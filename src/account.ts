@@ -10,7 +10,7 @@ import { mergeTokenResponse, parseCred, type OauthCred, type TokenResponse } fro
 import { release, tryAcquire } from './lock.ts';
 import { refreshToken, type Http } from './oauth.ts';
 import { runScript, succeeded } from './scripts.ts';
-import { ensureDir0700, nowIso, parseJsonObject, readFileNoFollow, writeFileAtomic0600 } from './util.ts';
+import { ensureDir0700, fingerprint, nowIso, parseJsonObject, readFileNoFollow, writeFileAtomic0600 } from './util.ts';
 
 export type State = 'ok' | 'due' | 'refreshing' | 'retrying' | 'dead' | 'critical' | 'breaker';
 
@@ -134,11 +134,10 @@ export class Account {
    * Resolve a persisted-but-unapplied refresh response (crash between the
    * request and the vault write). Never deleted unless provably applied:
    * it may hold the only copy of a rotated RT.
-   *  - vault already carries the response's access token → applied, delete
+   *  - vault already carries the response's access or refresh token → applied, delete
    *  - response was made from the current vault → apply it now
    *  - otherwise → keep it, go critical, a human decides
-   *  - the vault holds a credential expiring no earlier than the response would → superseded, delete
- * Returns 'none' | 'applied' | 'unresolved'.
+   * Returns 'none' | 'applied' | 'unresolved'.
    */
   async recoverPending(): Promise<'none' | 'applied' | 'unresolved'> {
     const pendingPath = this.p.pending(this.cfg.id);
@@ -147,29 +146,55 @@ export class Account {
     const pending = parseJsonObject(text) as { base?: string; at?: number; raw?: string } | null;
     const body = pending && typeof pending.raw === 'string' ? (parseJsonObject(pending.raw) as TokenResponse | null) : null;
     const vault = this.vault();
-    if (vault && body && typeof body.access_token === 'string' && body.access_token === vault.accessToken) {
-      rmSync(pendingPath, { force: true }); // already applied
-      return 'none';
-    }
-    const pendingExpiry = pending && typeof pending.at === 'number' && body ? pending.at + Number(body.expires_in) * 1000 : NaN;
-    if (vault && Number.isFinite(pendingExpiry) && vault.expiresAt >= pendingExpiry && pending!.base !== vault.fingerprint) {
-      // The vault holds a credential issued after this response (a later login or
-      // a consumer's later refresh), so this response is superseded.
-      rmSync(pendingPath, { force: true });
-      this.emit(this.cfg.id, 'pending_superseded', 'warn', { vault: vault.fingerprint });
+    if (vault && body && ((typeof body.access_token === 'string' && body.access_token === vault.accessToken)
+        || (typeof body.refresh_token === 'string' && body.refresh_token === vault.refreshToken))) {
+      rmSync(pendingPath, { force: true }); // provably applied: the vault carries this response's token
       return 'none';
     }
     const merged = vault && body && pending!.base === vault.fingerprint && typeof pending!.at === 'number'
       ? mergeTokenResponse(vault, body, pending!.at!) : null;
     if (!merged) {
       this.setStuck('critical', vault?.fingerprint ?? null);
-      this.emit(this.cfg.id, 'critical_unknown_response', 'critical', {
-        stage: 'recovery', pendingPath, baseMatches: !!vault && pending?.base === vault.fingerprint, parsed: !!body,
-      });
+      const key = fingerprint(text);
+      if (this.pendingReported !== key) { // once per pending content, not once per tick
+        this.pendingReported = key;
+        this.emit(this.cfg.id, 'pending_unresolved', 'critical', {
+          pendingPath, baseMatches: !!vault && pending?.base === vault.fingerprint, parsed: !!body,
+          hint: `inspect and resolve with: cred-keeper pending ${this.cfg.id} apply|discard --confirm ${this.cfg.id}`,
+        });
+      }
       return 'unresolved';
     }
     await this.apply(merged.text, merged.rotatedRt, 'recovered_pending');
     return 'applied';
+  }
+
+  /** Human resolution of an unresolved pending response. Returns what happened. */
+  async resolvePending(action: 'apply' | 'discard'): Promise<string> {
+    const lockPath = this.p.lock(this.cfg.id);
+    if (!tryAcquire(lockPath)) return 'locked';
+    try {
+      const text = readFileNoFollow(this.p.pending(this.cfg.id));
+      if (text === null) return 'no_pending';
+      if (action === 'discard') {
+        rmSync(this.p.pending(this.cfg.id), { force: true });
+        this.emit(this.cfg.id, 'pending_discarded', 'warn', {});
+        return 'discarded';
+      }
+      const pending = parseJsonObject(text) as { at?: number; raw?: string } | null;
+      const body = pending && typeof pending.raw === 'string' ? (parseJsonObject(pending.raw) as TokenResponse | null) : null;
+      const vault = this.vault() ?? (() => { const r = parseCred(readFileNoFollow(this.cfg.credentialPath)); return r.ok ? r.cred : null; })();
+      if (!body || !vault) return 'unparseable';
+      // Force-apply onto whatever credential structure we have (base check waived by the operator).
+      const merged = mergeTokenResponse(vault, body, typeof pending!.at === 'number' ? pending!.at : this.now());
+      if (!merged) return 'unusable';
+      this.refreshing = true;
+      try { await this.apply(merged.text, merged.rotatedRt, 'recovered_pending'); } finally { this.refreshing = false; }
+      this.stuckFingerprint = null;
+      return 'applied';
+    } finally {
+      release(lockPath);
+    }
   }
 
   /** Best effort: a leftover pending file is resolved later by recoverPending (it is provably applied). */
@@ -182,6 +207,8 @@ export class Account {
     this.state = state;
     this.stuckFingerprint = fp;
   }
+
+  private pendingReported: string | null = null;
 
   /** A merged credential we could not persist yet (disk error): retried every tick. */
   unsaved: string | null = null;

@@ -17,6 +17,8 @@ export function runScript(opts: {
   script: string; env: Record<string, string>; stdin?: string; timeoutMs: number; logDir: string; label: string;
   /** Secrets to scrub from the captured output before it is logged. */
   redactKnown?: readonly string[];
+  /** How long to let stdio drain after exit (ms). */
+  drainMs?: number;
 }): Promise<ScriptResult> {
   const started = Date.now();
   return new Promise((resolve) => {
@@ -59,11 +61,12 @@ export function runScript(opts: {
     // 'exit', not 'close': a background descendant holding stdout open must not
     // turn a finished script into a timeout. Give stdio a moment to flush.
     child.on('exit', (code, signal) => {
+      clearTimeout(timer); // the script is done; the drain delay below must not count against its timeout
       setTimeout(() => {
         child.stdout?.destroy();
         child.stderr?.destroy();
         done({ code, signal, timedOut, ms: Date.now() - started });
-      }, 100);
+      }, opts.drainMs ?? 100);
     });
   });
 }

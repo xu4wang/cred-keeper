@@ -118,3 +118,17 @@ test('systemd quoting and launchd plist', async () => {
   assert.match(pl, /<key>LimitLoadToSessionType<\/key><string>Background<\/string>/);
   assert.match(pl, /<string>\/n<\/string>/);
 });
+
+test('runScript: a script exiting before its timeout is not reported as timed out', async () => {
+  const { runScript } = await import('../src/scripts.ts');
+  const { script } = await import('./helpers.ts');
+  const d = tmp();
+  const ok = script(d, 'ok.sh', 'sleep 0.05; exit 0');
+  // exits well before the timeout, but the stdio drain runs past it
+  const r = await runScript({ script: ok, env: {}, timeoutMs: 1500, drainMs: 2500, logDir: d, label: 't' });
+  assert.equal(r.code, 0);
+  assert.equal(r.timedOut, false);
+  const slow = script(d, 'slow.sh', 'sleep 5');
+  const r2 = await runScript({ script: slow, env: {}, timeoutMs: 200, logDir: d, label: 't2' });
+  assert.equal(r2.timedOut, true);
+});

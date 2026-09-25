@@ -22,8 +22,8 @@ npm ci --omit=dev
 - **Refresh.** When the access token has `marginMin` minutes or less left (plus 0–5 minutes of jitter), it calls `POST /v1/oauth/token`. On HTTP 200 the raw response text is saved byte-for-byte to `<dataDir>/pending/` before parsing. Then the vault is updated, then the published file (the old one kept as `.prev`). Every write is an atomic 0600 rename with fsync of both the file and its directory. Finally the account's `onRefreshed` script runs. If the pending file cannot be written, the credential is still applied. If the vault cannot be written, the credential is held in memory and written again every minute.
 - **Pending responses are never silently discarded.** On startup and on every tick, a pending response is:
   - applied, if it was made from the current vault
-  - removed, if the vault already carries its access token, or holds a credential that expires later than the response would
-  - otherwise kept, and the account goes `critical`. No new refresh is sent while a pending response is unresolved, because it may hold the only live refresh token.
+  - removed, if the vault already carries its access or refresh token (so it was applied earlier)
+  - otherwise kept, and the account goes `critical`, reported once per pending file. No new refresh is sent while a pending response is unresolved, because it may hold the only live refresh token. An operator resolves it with `cred-keeper pending <id> apply|discard --confirm <id>`.
 - **Outcomes:**
   - network failure → retry, alert on the second consecutive failure
   - `invalid_grant` → `dead` (a human must log in again); never retried with the same refresh token
@@ -95,6 +95,7 @@ Examples in `examples/`:
 cred-keeper serve [--config <path>]
 cred-keeper status [id]
 cred-keeper refresh <id> --force --confirm <id>   # rotates the RT and revokes the current AT for every consumer
+cred-keeper pending <id> apply|discard --confirm <id>  # resolve a saved refresh response the service could not apply
 cred-keeper doctor                                  # connectivity (expects 405), credential files, keychain split, scripts, contract, legacy cron
 cred-keeper alert-test
 cred-keeper install-service [--load]                # launchd (Background session) / systemd --user

@@ -11,6 +11,7 @@ const USAGE = `usage: cred-keeper <command> [--config <path>]
   serve                              run the service (launchd / systemd calls this)
   status [id]                        query the running service
   refresh <id> --force --confirm <id>  force a refresh (rotates the RT, revokes the old AT)
+  pending <id> apply|discard --confirm <id>  resolve a saved refresh response the service could not apply
   doctor                             environment and configuration checks
   alert-test                         send a test event through the alert script
   install-service [--load]           write (and optionally load) the service definition`;
@@ -60,6 +61,23 @@ async function main(): Promise<number> {
       await svc.alerter.drain();
       console.log(JSON.stringify({ result: r, status: a.status() }, null, 2));
       return r === 'refreshed' ? 0 : 1;
+    }
+    case 'pending': {
+      const id = process.argv[3];
+      const action = process.argv[4];
+      if (!id || (action !== 'apply' && action !== 'discard') || arg('--confirm') !== id) {
+        console.error('usage: cred-keeper pending <id> apply|discard --confirm <id>\n'
+          + '  apply   — force-apply the saved refresh response onto the current credential\n'
+          + '  discard — delete it (only if you are sure it holds no live refresh token)');
+        return 2;
+      }
+      const svc = new Service(configPath);
+      const a = svc.accounts.get(id);
+      if (!a) { console.error(`unknown account ${id}`); return 2; }
+      const r = await a.resolvePending(action);
+      await svc.alerter.drain();
+      console.log(r);
+      return r === 'applied' || r === 'discarded' ? 0 : 1;
     }
     case 'doctor': {
       const checks = await doctor(loadConfig(configPath));

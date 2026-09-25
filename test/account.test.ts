@@ -140,16 +140,24 @@ test('pending recovery: applied from base; already-applied or superseded removed
   pend('whatever', { access_token: 'AT-rec', expires_in: 100 });
   assert.equal(await a.recoverPending(), 'none', 'vault already carries this AT → applied earlier');
   assert.equal(existsSync(p.pending('a1')), false);
+  pend('whatever', { access_token: 'AT-other', refresh_token: 'RT-rec', expires_in: 100 });
+  assert.equal(await a.recoverPending(), 'none', 'vault already carries this RT → applied earlier');
   pend('oldbase', { access_token: 'AT-x', refresh_token: 'RT-x', expires_in: 1 }, Date.now() - HOUR);
-  assert.equal(await a.recoverPending(), 'none', 'vault expires after the response would → superseded');
-  assert.equal(existsSync(p.pending('a1')), false);
-  pend('oldbase', { access_token: 'AT-y', refresh_token: 'RT-LIVE', expires_in: 99_999 });
-  assert.equal(await a.recoverPending(), 'unresolved');
-  assert.ok(existsSync(p.pending('a1')), 'possibly the only live RT: never deleted');
+  assert.equal(await a.recoverPending(), 'unresolved', 'expiry ordering proves nothing about lineage: keep it');
+  assert.ok(existsSync(p.pending('a1')), 'possibly the only live RT: never deleted automatically');
   assert.equal(a.state, 'critical');
   const n = fake.tokenRequests.length;
   assert.equal(await a.refresh(true), 'pending_unresolved');
   assert.equal(fake.tokenRequests.length, n, 'no new refresh while a pending response is unresolved');
+  await a.recoverPending();
+  await a.recoverPending();
+  assert.equal(svc.store.events({ type: 'pending_unresolved', limit: 10 }).length, 1, 'reported once per pending content, not per tick');
+  assert.equal(await a.resolvePending('apply'), 'applied');
+  assert.match(readFileSync(credPath, 'utf-8'), /RT-x/);
+  assert.equal(existsSync(p.pending('a1')), false);
+  pend('oldbase', { access_token: 'AT-z', refresh_token: 'RT-z', expires_in: 1 });
+  assert.equal(await a.resolvePending('discard'), 'discarded');
+  assert.equal(existsSync(p.pending('a1')), false);
 });
 
 test('pending cannot be persisted → the new credential is still applied', async () => {
