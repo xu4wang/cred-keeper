@@ -116,9 +116,13 @@ test('systemd quoting and launchd plist', async () => {
   const { systemdQuote, systemdUnit, launchdPlist } = await import('../src/install.ts');
   assert.equal(systemdQuote('/a b/%h"x\\'), '"/a b/%%h\\"x\\\\"');
   assert.match(systemdUnit('/n', '/c d.ts', '/cfg'), /ExecStart="\/n" "\/c d.ts" "serve" "--config" "\/cfg"/);
-  const pl = launchdPlist('/n', '/c.ts', '/cfg', '/logs');
-  assert.match(pl, /<key>LimitLoadToSessionType<\/key><string>Background<\/string>/);
-  assert.match(pl, /<string>\/n<\/string>/);
+  const pl = launchdPlist('/opt/node/bin/node', '/c.ts', '/cfg', '/logs', { name: 'alice', home: '/Users/alice' });
+  assert.match(pl, /<key>UserName<\/key><string>alice<\/string>/);
+  assert.match(pl, /<key>HOME<\/key><string>\/Users\/alice<\/string>/);
+  assert.match(pl, /<key>USER<\/key><string>alice<\/string>/);
+  assert.match(pl, /<key>PATH<\/key><string>\/opt\/node\/bin:/, 'node dir first: botmux and lark-cli are node scripts');
+  assert.doesNotMatch(pl, /LimitLoadToSessionType/, 'a LaunchDaemon, not a per-session agent');
+  assert.match(systemdUnit('/opt/node/bin/node', '/c', '/cfg'), /Environment=PATH=\/opt\/node\/bin:/);
 });
 
 test('runScript: a script exiting before its timeout is not reported as timed out', async () => {
@@ -133,4 +137,16 @@ test('runScript: a script exiting before its timeout is not reported as timed ou
   const slow = script(d, 'slow.sh', 'sleep 5');
   const r2 = await runScript({ script: slow, env: {}, timeoutMs: 200, logDir: d, label: 't2' });
   assert.equal(r2.timedOut, true);
+});
+
+test('keychain: service naming and an explicit keychain on every lookup', async () => {
+  const { keychainServiceFor, keychainLookupArgs, loginKeychainPath } = await import('../src/keychain.ts');
+  const { homedir } = await import('node:os');
+  const { createHash } = await import('node:crypto');
+  assert.equal(keychainServiceFor(join(homedir(), '.claude', '.credentials.json')), 'Claude Code-credentials');
+  const dir = '/Users/x/accounts/a/claude';
+  assert.equal(keychainServiceFor(`${dir}/.credentials.json`), `Claude Code-credentials-${createHash('sha256').update(dir).digest('hex').slice(0, 8)}`);
+  const args = keychainLookupArgs('svc', loginKeychainPath());
+  assert.equal(args.at(-1), join(homedir(), 'Library', 'Keychains', 'login.keychain-db'), 'daemon context: name the login keychain explicitly');
+  assert.ok(!args.includes('-w'), 'existence only, never the secret');
 });

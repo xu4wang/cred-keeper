@@ -41,6 +41,9 @@ npm ci --omit=dev
 - **锁。** 每个账号一把锁，只在该账号刷新期间持有。锁里记录持有者的 pid 和进程启动时间，所以持有者崩溃，或者 pid 之后被无关进程复用，都能被识别为陈旧锁。
 - **秘密。** token 不会出现在命令行参数、环境变量、事件或接口响应里，出现的只有 sha256 的前 12 位十六进制指纹。脚本的 stdout/stderr 只写到 `<dataDir>/logs/scripts.log`（0600），不经过接口返回。写入之前会把该账号当前的 token，以及所有形如 token 的字符串（`sk-ant-…`）替换掉。脱敏只是兜底，脚本本身仍不应打印凭证。
 - **一个凭证文件只能属于一个账号。** 配置里如果两个账号共用同一个 `credentialPath`，会直接被拒绝。
+- **覆盖之前一定留底。** 收编更新的文件时，被替换的副本另存为 `vault/<id>.displaced-*.json`；重新发布覆盖损坏的文件时，把损坏的文件另存为 `vault/<id>.quarantine-*.json`。
+- **旧 cron 的锁。** 配置了 `legacyLockDir` 的账号（迁移期间的 default 账号），每次刷新时也会按旧脚本的协议（mkdir + pid）持有旧锁。所以即使 cron 还没停，两边也不可能同时刷新同一个 RT。
+- **keychain 分裂闸门（macOS）。** 刷新之前先检查 claude 在 keychain 里有没有这份凭证的条目：`~/.claude` 对应 `Claude Code-credentials`，其他目录对应 `Claude Code-credentials-<目录 sha256 前 8 位>`。如果条目存在，claude 读的是 keychain 而不是我们刷新的文件，所以拒绝刷新并告警。只检查是否存在，而且总是在明确指定的 login keychain 里查。LaunchDaemon 不一定看得到这个 keychain，所以服务启动时会查找一个哨兵条目（用 `cred-keeper keychain-sentinel` 创建），并在 `/healthz` 的 `keychainGate` 里报告结果：`active`，或者 `unavailable`（同时告警）。只有 `active` 时闸门才生效，绝不会假装在检查。
 
 ## 配置（`~/.cred-keeper/config.json`）
 
@@ -53,6 +56,7 @@ npm ci --omit=dev
 | `claudeBinary` | 要审计的 claude 二进制；服务会检查其中 client_id、接口路径和请求头是否还在 |
 | `accounts[].credentialPath` | 发布的凭证文件 |
 | `accounts[].onRefreshed` | 每次刷新后执行的脚本，见下文 |
+| `accounts[].legacyLockDir` | 刷新这个账号时，同时持有旧 cron 的锁（mkdir + pid） |
 | `alert.script` | 告警投递脚本；不配置就不发告警 |
 | `alert.minLevel` | `info` / `warn` / `error` / `critical`，默认 `error` |
 | `alert.heartbeat` | 每日汇总的时间，格式 `HH:MM`；不配置就不发心跳 |
@@ -61,7 +65,7 @@ npm ci --omit=dev
 
 ## 脚本
 
-两类脚本都直接执行（不经过 shell），各自运行在独立的进程组里，`PATH` 是最小集合。脚本里请使用绝对路径。
+两类脚本都直接执行（不经过 shell），各自运行在独立的进程组里。服务的 `PATH` 是 node 所在目录加上系统目录。botmux 和 lark-cli 都是 node 脚本，所以示例里用 `"$NODE" <脚本>` 的方式调用。你自己写脚本时也请用绝对路径。
 
 **onRefreshed：**
 
@@ -82,7 +86,7 @@ npm ci --omit=dev
 
 `examples/` 目录里的示例：
 
-- `on-refreshed-botmux-default.sh` — 播种各 bot 的凭证副本，然后 `botmux suspend all`（与旧 cron 脚本的行为一致）
+- `on-refreshed-botmux-default.sh` — 播种各 bot 的凭证副本，然后 `botmux suspend all`（与旧 cron 脚本的行为一致）。bots.json 里配了 `credentialsSourceDir` 的 bot 会被跳过。botmux 本身跑不起来（退出码 126/127）时，脚本失败，触发 `hook_failed`；其他非 0 退出码（部分会话不活跃）照旧容忍。注意：旧脚本每次运行都发心跳，cred-keeper 改为每天一次汇总（`alert.heartbeat`）
 - `on-refreshed-botmux-account.sh` — 对使用独立账号的 bot 执行 `botmux suspend --bot <appId>`
 - `alert-lark.sh` — 通过 `lark-cli` 发飞书/Lark 私信
 
@@ -106,8 +110,28 @@ cred-keeper refresh <id> --force --confirm <id>   # 会轮换 RT，并吊销所�
 cred-keeper pending <id> apply|discard --confirm <id> [--replace <副本指纹>]  # 处理服务没能自动应用的刷新响应
 cred-keeper doctor                                  # 连通性（要求返回 405）、凭证文件、keychain 分裂、脚本、契约、旧 cron
 cred-keeper alert-test
-cred-keeper install-service [--load]                # launchd（Background 会话）/ systemd --user
+cred-keeper keychain-sentinel                       # macOS：创建哨兵条目，服务用它来确认自己能看到 keychain
+cred-keeper install-service [--load]                # macOS：生成 LaunchDaemon 的 plist，并打印需要 sudo 执行的命令；Linux：systemd --user
 ```
+
+## 安装为服务（macOS）
+
+服务以 **LaunchDaemon** 运行：属于 system 域，`UserName` 是你本人，并显式设置 `HOME`、`USER` 和 `PATH`。所以开机后即使没有任何人登录也会启动，而用户级的 LaunchAgent 做不到这一点。
+
+```sh
+cred-keeper keychain-sentinel --config …     # 在普通登录会话里执行一次
+cred-keeper install-service --config …       # 生成 <dataDir>/../com.cred-keeper.plist，并打印下面的命令：
+sudo install -o root -g wheel -m 644 <plist> /Library/LaunchDaemons/com.cred-keeper.plist
+sudo launchctl bootstrap system /Library/LaunchDaemons/com.cred-keeper.plist
+curl -s 127.0.0.1:<port>/healthz              # keychainGate 应为 "active"
+```
+
+在 daemon 自己的上下文里正向验证 keychain 闸门：
+
+1. 用该账号对应的服务名创建一个测试条目，例如 `security add-generic-password -s "Claude Code-credentials-<hash>" -a test -w x`
+2. 让该账号进入到期状态，例如临时调大它的 `marginMin`
+3. 确认出现了 `keychain_split` 事件，并且没有发出刷新请求
+4. 删除测试条目，恢复配置
 
 ## 测试
 

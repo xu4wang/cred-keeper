@@ -21,7 +21,7 @@ export type RefreshOutcome =
 export class Http {
   readonly dispatcher?: Dispatcher;
   readonly timeoutMs: number;
-  constructor(proxy?: string, timeoutMs = 30_000) {
+  constructor(proxy?: string, timeoutMs = 60_000) {
     this.dispatcher = proxy ? new ProxyAgent(proxy) : undefined;
     this.timeoutMs = timeoutMs;
   }

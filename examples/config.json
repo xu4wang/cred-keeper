@@ -1,8 +1,15 @@
 {
   "listen": "127.0.0.1:8790",
   "dataDir": "~/.cred-keeper",
-  "defaults": { "marginMin": 120, "redMin": 30, "rtWarnDays": 7, "usagePollMin": 10 },
-  "network": { "proxy": "" },
+  "defaults": {
+    "marginMin": 120,
+    "redMin": 30,
+    "rtWarnDays": 7,
+    "usagePollMin": 10
+  },
+  "network": {
+    "proxy": ""
+  },
   "claudeBinary": "~/.local/node-v24/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
   "accounts": [
     {
@@ -10,7 +17,8 @@
       "provider": "claude-oauth",
       "credentialPath": "~/.claude/.credentials.json",
       "onRefreshed": "~/.cred-keeper/hooks/on-refreshed-botmux-default.sh",
-      "hookTimeoutSec": 60
+      "hookTimeoutSec": 60,
+      "legacyLockDir": "~/.botmux/logs/.cred-refresh.lock"
     }
   ],
   "alert": {

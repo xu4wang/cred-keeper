@@ -6,7 +6,7 @@
  * crashed and the pid number came back).
  */
 import { execFileSync } from 'node:child_process';
-import { constants, closeSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { constants, closeSync, mkdirSync, openSync, readFileSync, rmdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { ensureDir0700, parseJsonObject } from './util.ts';
 
@@ -67,6 +67,44 @@ export function release(path: string): void {
   try {
     const h = parseJsonObject(readFileSync(path, 'utf-8')) as LockHolder | null;
     if (h?.pid === process.pid) rmSync(path, { force: true });
+  } catch { /* already gone */ }
+}
+
+/**
+ * Take the legacy cron script's lock with its own protocol: mkdir the dir, then
+ * write our pid to `<dir>/pid`. A dir whose recorded pid is dead is stale and
+ * cleaned first (same rule as the script). Returns false while a live holder has it.
+ */
+export function acquireLegacy(dir: string): boolean {
+  if (legacyLockLive(dir)) return false;
+  let owner = 0;
+  try { owner = Number(readFileSync(`${dir}/pid`, 'utf-8').trim()) || 0; } catch { /* no pid file */ }
+  if (owner && !pidAlive(owner)) {
+    rmSync(`${dir}/pid`, { force: true });
+    rmSync(`${dir}/alerted`, { force: true });
+    try { rmdirSync(dir); } catch { /* gone or not empty */ }
+  }
+  try {
+    mkdirSync(dir, { mode: 0o700 });
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'EEXIST') return false; // holder mid-acquire (dir before pid)
+    throw e;
+  }
+  try {
+    writeFileSync(`${dir}/pid`, `${process.pid}\n`, { mode: 0o600 });
+  } catch (e) {
+    try { rmdirSync(dir); } catch { /* ignore */ }
+    throw e;
+  }
+  return true;
+}
+
+export function releaseLegacy(dir: string): void {
+  try {
+    if (Number(readFileSync(`${dir}/pid`, 'utf-8').trim()) !== process.pid) return;
+    rmSync(`${dir}/pid`, { force: true });
+    rmSync(`${dir}/alerted`, { force: true });
+    rmdirSync(dir);
   } catch { /* already gone */ }
 }
 

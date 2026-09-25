@@ -4,9 +4,9 @@ import { Account, type Emit } from './account.ts';
 import { Alerter } from './alert.ts';
 import { auditBinary } from './audit.ts';
 import { loadConfig, paths, type Config, type Level } from './config.ts';
-import { legacyLockLive } from './lock.ts';
 import { fetchUsage, Http, project, type UsageSnapshot } from './oauth.ts';
 import { Store } from './store.ts';
+import { probeKeychainGate, type GateState } from './keychain.ts';
 import { ensureDir0700, nowIso } from './util.ts';
 
 const FIVE_H = 5 * 3600_000;
@@ -94,7 +94,9 @@ export class Service {
         existing.cfg = a;
         next.set(a.id, existing);
       } else {
-        next.set(a.id, new Account(a, this.cfg, this.http, this.emit, this.now));
+        const acc = new Account(a, this.cfg, this.http, this.emit, this.now);
+        acc.keychainGate = this.keychainGate ?? 'not-applicable';
+        next.set(a.id, acc);
       }
     }
     this.accounts = next;
@@ -118,10 +120,17 @@ export class Service {
     this.store.addEvent(null, 'config_reloaded', 'info', { accounts: cfg.accounts.map((a) => a.id) });
   }
 
+  keychainGate: GateState = 'not-applicable';
+
   async start(): Promise<void> {
     if (!this.cfg.alert) this.store.addEvent(null, 'alerts_disabled', 'info', { reason: 'alert.script not configured' });
-    const legacy = this.cfg.legacyLockDir;
-    while (legacy && legacyLockLive(legacy)) await new Promise((r) => setTimeout(r, 5000));
+    this.keychainGate = probeKeychainGate();
+    for (const a of this.accounts.values()) a.keychainGate = this.keychainGate;
+    if (this.keychainGate === 'unavailable') {
+      this.emit(null, 'keychain_gate_unavailable', 'error', {
+        hint: 'the keychain split check cannot see the login keychain from this context; run `cred-keeper keychain-sentinel` in a login session, then restart the service',
+      });
+    }
     for (const a of this.accounts.values()) {
       try { if ((await a.recoverPending()) !== 'locked') a.reconcileLocked(); } catch (e) {
         this.emit(a.cfg.id, 'internal_error', 'error', { stage: 'startup', error: (e as Error).message });

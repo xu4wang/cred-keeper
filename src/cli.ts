@@ -5,6 +5,7 @@ import { startApi } from './api.ts';
 import { loadConfig, paths } from './config.ts';
 import { doctor } from './doctor.ts';
 import { installService } from './install.ts';
+import { installSentinel, SENTINEL_SERVICE } from './keychain.ts';
 import { Service } from './service.ts';
 
 const USAGE = `usage: cred-keeper <command> [--config <path>]
@@ -14,6 +15,7 @@ const USAGE = `usage: cred-keeper <command> [--config <path>]
   pending <id> apply|discard --confirm <id> [--replace <vault-fp>]  resolve a saved refresh response the service could not apply
   doctor                             environment and configuration checks
   alert-test                         send a test event through the alert script
+  keychain-sentinel                  create the keychain sentinel (run from a login session, macOS)
   install-service [--load]           write (and optionally load) the service definition`;
 
 function arg(name: string): string | undefined {
@@ -84,6 +86,12 @@ async function main(): Promise<number> {
       }
       console.log(r);
       return r === 'applied' || r === 'discarded' ? 0 : 1;
+    }
+    case 'keychain-sentinel': {
+      // Run from a normal login session (not from the daemon).
+      installSentinel();
+      console.log(`created "${SENTINEL_SERVICE}" in the login keychain; restart the service and check /healthz keychainGate`);
+      return 0;
     }
     case 'doctor': {
       const checks = await doctor(loadConfig(configPath));

@@ -2,11 +2,14 @@
 # onRefreshed hook for a dedicated account used by specific botmux bots
 # (bots configured with `credentialsSourceDir`, botmux PR #1575).
 # No seeding needed: the worker copies the source on every cold spawn.
+# Absolute paths only: cred-keeper runs hooks with a minimal PATH.
 set -u
-BOTMUX_BIN="${BOTMUX_BIN:-$HOME/.botmux/bin/botmux}"
+NODE="${NODE:-$(command -v node)}"
+BOTMUX_CLI="${BOTMUX_CLI:-$HOME/beta/botmux/dist/cli.js}"
 BOTS=(cli_aaaa cli_bbbb)   # ← the appIds using this account
+if [ -z "$NODE" ] || [ ! -x "$NODE" ] || [ ! -f "$BOTMUX_CLI" ]; then echo "node/botmux not found (set NODE / BOTMUX_CLI)" >&2; exit 127; fi
 rc=0
 for app in "${BOTS[@]}"; do
-  "$BOTMUX_BIN" suspend --bot "$app" || { echo "suspend failed: $app" >&2; rc=1; }
+  "$NODE" "$BOTMUX_CLI" suspend --bot "$app" || { echo "suspend failed: $app" >&2; rc=1; }
 done
 exit $rc

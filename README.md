@@ -35,6 +35,9 @@ npm ci --omit=dev
 - **Locks.** One lock per account, held only while that account is refreshing. The lock records the holder's pid and process start time, so a crashed holder, or an unrelated process that later reuses the pid, is detected as stale.
 - **Secrets.** Tokens never appear in argv, env, events, or API responses; only 12-hex-digit sha256 fingerprints do. Script stdout/stderr goes only to `<dataDir>/logs/scripts.log` (0600), never into the API. Before it is written there, the output is scrubbed of the account's current tokens and of anything token-shaped (`sk-ant-…`). Scrubbing is a safety net: scripts should still not print credentials.
 - **One account per credential file.** The config refuses two accounts sharing a `credentialPath`.
+- **Nothing overwritten without a copy.** Adopting a newer file keeps the replaced vault as `vault/<id>.displaced-*.json`; republishing over a corrupt file keeps that file as `vault/<id>.quarantine-*.json`.
+- **Legacy cron lock.** An account with `legacyLockDir` (the default account during migration) also takes the old script's `mkdir` + `pid` lock for every refresh, so a cron that is still scheduled can never refresh the same RT concurrently.
+- **Keychain split gate (macOS).** Before refreshing, the service checks whether claude's keychain item for this credential exists (`Claude Code-credentials` for `~/.claude`, `Claude Code-credentials-<sha256(dir)[:8]>` otherwise). If it does, the service refuses to refresh and alerts, because claude would be reading the keychain instead of the file. Only existence is checked, always in the explicitly named login keychain. A LaunchDaemon may not be able to see that keychain, so at startup the service looks up a sentinel item (`cred-keeper keychain-sentinel` creates it) and reports the result as `keychainGate` in `/healthz`: `active`, or `unavailable`, in which case it also sends an alert. The gate only runs when it is `active`; it never pretends to check.
 
 ## Configuration (`~/.cred-keeper/config.json`)
 
@@ -47,6 +50,7 @@ See `examples/config.json`.
 | `claudeBinary` | Binary to audit; the service checks that client_id, endpoints and header are still inside it |
 | `accounts[].credentialPath` | The published credential file |
 | `accounts[].onRefreshed` | Script run after each refresh, see below |
+| `accounts[].legacyLockDir` | Also hold the legacy cron lock (mkdir + pid) while refreshing this account |
 | `alert.script` | Alert delivery script; if unset, no alerts are sent |
 | `alert.minLevel` | `info` / `warn` / `error` / `critical`; default `error` |
 | `alert.heartbeat` | `HH:MM` daily summary; if unset, no heartbeat |
@@ -55,7 +59,7 @@ Hot reload happens on SIGHUP or when the config file's mtime changes. It is defe
 
 ## Scripts
 
-Both kinds are executed directly (no shell), each in its own process group, with a minimal `PATH`. Use absolute paths inside scripts.
+Both kinds are executed directly (no shell), each in its own process group. The service's `PATH` is the node binary's directory followed by the system directories. botmux and lark-cli are node scripts, so the examples call them as `"$NODE" <script>`; use absolute paths in your own scripts too.
 
 **onRefreshed:**
 
@@ -76,7 +80,7 @@ Both kinds are executed directly (no shell), each in its own process group, with
 
 Examples in `examples/`:
 
-- `on-refreshed-botmux-default.sh` — seed per-bot copies and `botmux suspend all` (what the legacy cron script did)
+- `on-refreshed-botmux-default.sh` — seed per-bot copies and `botmux suspend all` (what the legacy cron script did). Bots with `credentialsSourceDir` in bots.json are skipped. If botmux cannot run (exit 126/127), the hook fails and `hook_failed` is raised; other non-zero exits (inactive sessions) are tolerated as before. Note: the legacy script sent a heartbeat on every run; cred-keeper sends one daily summary (`alert.heartbeat`)
 - `on-refreshed-botmux-account.sh` — `botmux suspend --bot <appId>` for bots with their own account
 - `alert-lark.sh` — Feishu/Lark DM through `lark-cli`
 
@@ -100,8 +104,28 @@ cred-keeper refresh <id> --force --confirm <id>   # rotates the RT and revokes t
 cred-keeper pending <id> apply|discard --confirm <id> [--replace <vault-fp>]  # resolve a saved refresh response the service could not apply
 cred-keeper doctor                                  # connectivity (expects 405), credential files, keychain split, scripts, contract, legacy cron
 cred-keeper alert-test
-cred-keeper install-service [--load]                # launchd (Background session) / systemd --user
+cred-keeper keychain-sentinel                       # macOS: create the sentinel the service uses to verify its keychain view
+cred-keeper install-service [--load]                # macOS: writes a LaunchDaemon plist and prints the sudo commands; Linux: systemd --user
 ```
+
+## Installing as a service (macOS)
+
+The service runs as a **LaunchDaemon** (system domain, `UserName` = you, with `HOME`, `USER` and `PATH` set explicitly). It therefore starts at boot even when nobody logs in, which a per-user LaunchAgent would not do.
+
+```sh
+cred-keeper keychain-sentinel --config …     # once, from a normal login session
+cred-keeper install-service --config …       # writes <dataDir>/../com.cred-keeper.plist and prints:
+sudo install -o root -g wheel -m 644 <plist> /Library/LaunchDaemons/com.cred-keeper.plist
+sudo launchctl bootstrap system /Library/LaunchDaemons/com.cred-keeper.plist
+curl -s 127.0.0.1:<port>/healthz              # keychainGate should be "active"
+```
+
+To verify the keychain gate positively in the daemon's own context:
+
+1. Create a dummy item with the account's service name, e.g. `security add-generic-password -s "Claude Code-credentials-<hash>" -a test -w x`
+2. Make the account due, for example by temporarily raising its `marginMin`
+3. Confirm a `keychain_split` event appears and no refresh is sent
+4. Delete the dummy item and restore the config
 
 ## Tests
 

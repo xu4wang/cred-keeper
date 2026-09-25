@@ -352,3 +352,65 @@ test('no alert script → nothing is executed, event still recorded', async () =
   assert.equal(svc.alerter.enabled, false);
   assert.ok(types(svc).includes('rt_dead'));
 });
+
+test('legacy cron lock: held by a live process → no refresh; otherwise taken with the old protocol and released', async () => {
+  const { a, p } = setup();
+  const legacy = join(tmp(), 'legacy.lock');
+  a.cfg.legacyLockDir = legacy;
+  mkdirSync(legacy);
+  writeFileSync(join(legacy, 'pid'), String(process.ppid)); // a running cron refresh
+  const n = fake.tokenRequests.length;
+  assert.equal(await a.refresh(), 'locked');
+  assert.equal(fake.tokenRequests.length, n);
+  assert.equal(existsSync(p.lock('a1')), false, 'own lock released too');
+  writeFileSync(join(legacy, 'pid'), '999999'); // dead holder → stale, cleaned like the script does
+  let seenPid = '';
+  fake.tokenReplies.push({ status: 200, body: { access_token: 'AT-lg', refresh_token: 'RT-lg', expires_in: 100 } });
+  const orig = a.http.request.bind(a.http);
+  a.http.request = async (u, i) => { seenPid = readFileSync(join(legacy, 'pid'), 'utf-8').trim(); return orig(u, i); };
+  assert.equal(await a.refresh(), 'refreshed');
+  assert.equal(seenPid, String(process.pid), 'legacy lock held (mkdir + our pid) during the request');
+  assert.equal(existsSync(legacy), false, 'released after');
+});
+
+test('keychain split gate: refuses to refresh only when the gate is active and the item exists', async () => {
+  const { svc, a } = setup();
+  a.keychainProbe = () => true;
+  a.keychainGate = 'unavailable';
+  fake.tokenReplies.push({ status: 200, body: { access_token: 'AT-k1', expires_in: 28800 } });
+  assert.equal(await a.refresh(), 'refreshed', 'an unavailable gate does not pretend to check');
+  const s = setup();
+  s.a.keychainProbe = () => true;
+  s.a.keychainGate = 'active';
+  const n = fake.tokenRequests.length;
+  assert.equal(await s.a.refresh(), 'keychain_split');
+  assert.equal(fake.tokenRequests.length, n);
+  assert.ok(types(s.svc).includes('keychain_split'));
+  void svc;
+});
+
+test('adoption keeps the replaced vault; republish keeps the bad file', async () => {
+  const { a, credPath, p } = setup();
+  a.reconcile();
+  const vdir = dirname(p.vault('a1'));
+  writeFileSync(credPath, credText('AT-other-acct', 'RT-other-acct', Date.now() + 8 * HOUR));
+  a.reconcile();
+  const { readdirSync } = await import('node:fs');
+  const displaced = readdirSync(vdir).filter((n) => n.includes('.displaced-'));
+  assert.equal(displaced.length, 1);
+  assert.match(readFileSync(join(vdir, displaced[0]), 'utf-8'), /RT-old/, 'the previous RT survives the adoption');
+  writeFileSync(credPath, 'corrupt-by-consumer');
+  a.reconcile();
+  const q = readdirSync(vdir).filter((n) => n.includes('.quarantine-'));
+  assert.equal(q.length, 1);
+  assert.equal(readFileSync(join(vdir, q[0]), 'utf-8'), 'corrupt-by-consumer');
+});
+
+test('invalid_grant right after a network failure is annotated as a likely in-transit loss', async () => {
+  const { svc, a } = setup();
+  fake.tokenReplies.push('hangup', { status: 400, body: { error: 'invalid_grant' } });
+  await a.refresh();
+  await a.refresh();
+  const ev = svc.store.events({ type: 'rt_dead', limit: 1 })[0];
+  assert.match(String(ev.data.likelyCause), /lost in transit/);
+});

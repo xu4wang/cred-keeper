@@ -6,7 +6,8 @@
 set -u
 ALERT_APP=""   # bot appId whose lark-cli config (~/.lark-cli-bots/<appId>) sends the message
 ALERT_TO=""    # recipient open_id
-LARK_CLI=""    # absolute path to lark-cli
+LARK_CLI=""    # absolute path to lark-cli (a node script)
+NODE="${NODE:-$(command -v node)}"   # lark-cli has a `#!/usr/bin/env node` shebang: run it with node explicitly
 if [ -z "$ALERT_APP" ] || [ -z "$ALERT_TO" ] || [ -z "$LARK_CLI" ]; then
   echo "alert-lark.sh is not configured (ALERT_APP / ALERT_TO / LARK_CLI)" >&2; exit 2
 fi
@@ -17,4 +18,4 @@ case "$CK_LEVEL" in critical) icon="🔴";; error) icon="🟠";; warn) icon="�
 text="${icon}【${HOSTTAG}】${CK_TITLE}
 ${payload:0:1500}"
 LARKSUITE_CLI_CONFIG_DIR="$HOME/.lark-cli-bots/$ALERT_APP" \
-  /usr/bin/perl -e 'alarm 30; exec @ARGV' "$LARK_CLI" im +messages-send --as bot --user-id "$ALERT_TO" --text "$text" >/dev/null
+  /usr/bin/perl -e 'alarm 30; exec @ARGV' "$NODE" "$LARK_CLI" im +messages-send --as bot --user-id "$ALERT_TO" --text "$text" >/dev/null

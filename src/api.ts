@@ -27,7 +27,7 @@ export function handle(svc: Service, req: IncomingMessage, res: ServerResponse):
   const parts = url.pathname.split('/').filter(Boolean);
   try {
     if (url.pathname === '/healthz') {
-      send(res, 200, { ok: true, version: VERSION, config: svc.configPath, accounts: [...svc.accounts.keys()], alerts: svc.alerter.enabled });
+      send(res, 200, { ok: true, version: VERSION, config: svc.configPath, accounts: [...svc.accounts.keys()], alerts: svc.alerter.enabled, keychainGate: svc.keychainGate });
       return;
     }
     if (parts[0] === 'v1' && parts[1] === 'accounts') {

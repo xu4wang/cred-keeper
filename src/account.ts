@@ -8,7 +8,8 @@ import { randomBytes } from 'node:crypto';
 import type { AccountConfig, Config, Level } from './config.ts';
 import { paths } from './config.ts';
 import { mergeTokenResponse, parseCred, type OauthCred, type TokenResponse } from './cred.ts';
-import { release, tryAcquire } from './lock.ts';
+import { acquireLegacy, release, releaseLegacy, tryAcquire } from './lock.ts';
+import { keychainItemExists, keychainServiceFor } from './keychain.ts';
 import { refreshToken, type Http } from './oauth.ts';
 import { runScript, succeeded } from './scripts.ts';
 import { ensureDir0700, fingerprint, nowIso, parseJsonObject, readFileNoFollow, writeFileAtomic0600 } from './util.ts';
@@ -124,6 +125,9 @@ export class Account {
     // consumer's own successful refresh). Ties go to the file: a tie with a
     // different token can only come from a fresh login, not from our history.
     if (pub.ok && pub.cred.expiresAt >= vault.expiresAt) {
+      // Keep the vault being replaced: if the file came from a different account
+      // (someone logged another account into this path), its RT is the only copy.
+      this.keepAside('displaced', JSON.stringify(vault.raw));
       this.writeVault(pubText!);
       this.emit(this.cfg.id, 'adopted', 'warn', { from: vault.fingerprint, to: pub.cred.fingerprint });
       if (this.state === 'dead' || this.state === 'critical') {
@@ -134,7 +138,9 @@ export class Account {
       }
       return pub.cred;
     }
-    // absent / unparseable / logged out / older than vault → republish the vault
+    // absent / unparseable / logged out / older than vault → republish the vault.
+    // Keep the bad file for forensics (publish() only keeps valid files as .prev).
+    if (pubText !== null && pubText.trim() !== '') this.keepAside('quarantine', pubText);
     this.publish(JSON.stringify(vault.raw));
     this.emit(this.cfg.id, 'republished', 'error', {
       reason: pub.ok ? 'older_than_vault' : pub.reason, fingerprint: vault.fingerprint,
@@ -241,6 +247,14 @@ export class Account {
     }
   }
 
+  /** Save a copy under the vault dir (0600, unique name). Best effort: never blocks the main path. */
+  private keepAside(kind: 'displaced' | 'quarantine', text: string): void {
+    try {
+      writeFileAtomic0600(join(dirname(this.p.vault(this.cfg.id)),
+        `${this.cfg.id}.${kind}-${this.now()}-${randomBytes(4).toString('hex')}.json`), text);
+    } catch { /* forensics only */ }
+  }
+
   /** Primary pending location, then an emergency one in a different directory. */
   private pendingPaths(): string[] {
     return [this.p.pending(this.cfg.id), join(this.global.dataDir, `pending-emergency-${this.cfg.id}.json`)];
@@ -289,6 +303,12 @@ export class Account {
   }
 
   private pendingReported = new Set<string>();
+  /** Set by the service after its startup probe; only 'active' makes the split check meaningful. */
+  keychainGate: import('./keychain.ts').GateState = 'unavailable';
+  /** Injectable for tests; production uses the real `security` lookup. */
+  keychainProbe: (service: string) => boolean | null = keychainItemExists;
+  /** Outcome of the previous refresh request (to annotate an invalid_grant that follows a network failure). */
+  private lastOutcome: string | null = null;
   /** base/vault pair observed under the lock by the last `base_mismatch`. */
   lastMismatch: { base: string | null; vault: string } | null = null;
 
@@ -379,6 +399,8 @@ export class Account {
     if (this.refreshing) return 'busy';
     const lockPath = this.p.lock(this.cfg.id);
     if (!tryAcquire(lockPath)) return 'locked';
+    const legacy = this.cfg.legacyLockDir;
+    if (legacy && !acquireLegacy(legacy)) { release(lockPath); return 'locked'; }
     this.refreshing = true;
     try {
       if (!this.flushUnsaved(true)) return 'persist_failed';
@@ -389,10 +411,19 @@ export class Account {
       if (!cur) return 'breaker';
       if ((this.state === 'dead' || this.state === 'critical') && this.stuckFingerprint === cur.fingerprint && !force) return this.state;
       if (!force && !this.isDue(cur)) return 'not_due';
+      // Keychain split: claude would read the keychain item, not the file we refresh.
+      // Refreshing would rotate the RT under claude's feet (the keychain copy dies).
+      const svc = keychainServiceFor(this.cfg.credentialPath);
+      if (this.keychainGate === 'active' && this.keychainProbe(svc) === true) {
+        this.emit(this.cfg.id, 'keychain_split', 'error', { service: svc, hint: `remove it: security delete-generic-password -s "${svc}"` });
+        return 'keychain_split';
+      }
       const left = this.leftMin(cur) ?? 0;
       this.state = 'refreshing';
       const at = this.now();
       const out = await refreshToken(this.http, this.global.endpoints.token, this.global.clientId, cur.refreshToken);
+      const prevOutcome = this.lastOutcome;
+      this.lastOutcome = out.kind;
       if (out.kind === 'ok' || out.kind === 'unparseable_200') {
         // The RT is rotated server-side from here on. Persist the raw response
         // first; if that fails, keep going in memory and retry every tick.
@@ -433,11 +464,16 @@ export class Account {
             { reason: 'network', error: out.error, failures: this.failures, leftMin: left });
           return 'network';
         }
-        case 'invalid_grant':
+        case 'invalid_grant': {
+          const afterNetwork = prevOutcome === 'network';
           this.setStuck('dead', cur.fingerprint);
           this.failures++;
-          this.emit(this.cfg.id, 'rt_dead', 'critical', { status: out.status, leftMin: left });
+          this.emit(this.cfg.id, 'rt_dead', 'critical', {
+            status: out.status, leftMin: left,
+            ...(afterNetwork ? { likelyCause: 'the previous attempt failed at the network layer after the server may already have rotated the RT: the new RT was probably lost in transit' } : {}),
+          });
           return 'dead';
+        }
         case 'rejected':
           this.state = 'retrying';
           this.failures++;
@@ -445,8 +481,10 @@ export class Account {
           this.emit(this.cfg.id, 'refresh_failed', 'error', { reason: 'rejected', status: out.status, errorKind: out.errorKind, leftMin: left });
           return 'rejected';
       }
+      return 'unknown';
     } finally {
       this.refreshing = false;
+      if (legacy) releaseLegacy(legacy);
       release(lockPath);
     }
   }

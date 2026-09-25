@@ -1,8 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { accessSync, constants, existsSync, lstatSync, statSync } from 'node:fs';
-import { createHash } from 'node:crypto';
-import { dirname } from 'node:path';
 import { auditBinary } from './audit.ts';
+import { keychainItemExists, keychainServiceFor, probeKeychainGate } from './keychain.ts';
 import { type Config } from './config.ts';
 import { parseCred } from './cred.ts';
 import { legacyLockLive } from './lock.ts';
@@ -10,16 +9,6 @@ import { Http } from './oauth.ts';
 import { readFileNoFollow } from './util.ts';
 
 export interface Check { name: string; ok: boolean; detail: string }
-
-function keychainHas(service: string): boolean | null {
-  if (process.platform !== 'darwin') return null;
-  try {
-    execFileSync('security', ['find-generic-password', '-s', service], { stdio: 'ignore' });
-    return true;
-  } catch (e) {
-    return (e as { status?: number }).status === 44 ? false : null;
-  }
-}
 
 function executable(p: string): boolean {
   try { accessSync(p, constants.X_OK); return statSync(p).isFile(); } catch { return false; }
@@ -47,16 +36,13 @@ export async function doctor(cfg: Config): Promise<Check[]> {
       add(`account:${a.id}:mode`, mode === 0o600, `mode ${mode.toString(8)}`);
     }
     if (a.onRefreshed) add(`account:${a.id}:onRefreshed`, executable(a.onRefreshed), a.onRefreshed);
-    // Keychain split: claude prefers keychain over the file. Default login uses
-    // "Claude Code-credentials"; CLAUDE_CONFIG_DIR logins use "<that>-<sha256(dir)[:8]>".
-    const dir = dirname(a.credentialPath);
-    const suffixed = `Claude Code-credentials-${createHash('sha256').update(dir.normalize('NFC')).digest('hex').slice(0, 8)}`;
-    for (const svc of [ 'Claude Code-credentials', suffixed ]) {
-      const has = keychainHas(svc);
-      if (has === null) continue;
-      if (svc === 'Claude Code-credentials' && a.id !== 'default') continue;
-      add(`account:${a.id}:keychain`, !has, has ? `keychain item "${svc}" exists — claude will read it instead of the file` : `no "${svc}"`);
-    }
+    const svc = keychainServiceFor(a.credentialPath);
+    const has = keychainItemExists(svc);
+    if (has !== null) add(`account:${a.id}:keychain`, !has, has ? `keychain item "${svc}" exists — claude will read it instead of the file` : `no "${svc}"`);
+  }
+  if (process.platform === 'darwin') {
+    const g = probeKeychainGate();
+    add('keychain-gate', g === 'active', g === 'active' ? 'sentinel visible (from this context)' : 'sentinel not found: run `cred-keeper keychain-sentinel`; the running service reports its own view in /healthz keychainGate');
   }
 
   if (cfg.alert) add('alert:script', executable(cfg.alert.script), cfg.alert.script);
@@ -77,6 +63,6 @@ export async function doctor(cfg: Config): Promise<Check[]> {
   } catch {
     add('legacy-cron', true, 'no crontab');
   }
-  if (cfg.legacyLockDir) add('legacy-lock', !legacyLockLive(cfg.legacyLockDir), cfg.legacyLockDir);
+  for (const a of cfg.accounts) if (a.legacyLockDir) add(`account:${a.id}:legacy-lock`, !legacyLockLive(a.legacyLockDir), `${a.legacyLockDir} (held by a running cron refresh?)`);
   return out;
 }

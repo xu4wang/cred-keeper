@@ -15,6 +15,12 @@ export interface AccountConfig {
   redMin: number;
   rtWarnDays: number;
   usagePollMin: number;
+  /**
+   * The legacy cron script's mkdir+pid lock for this credential (default account
+   * migration). When set, every refresh also holds it, so the service and a
+   * still-scheduled cron can never refresh the same RT concurrently.
+   */
+  legacyLockDir?: string;
 }
 
 export interface Config {
@@ -29,8 +35,6 @@ export interface Config {
   accounts: AccountConfig[];
   alert?: { script: string; timeoutSec: number; minLevel: Level; heartbeat?: string };
   usageThresholds: { fiveHourPct: number; projectedPct: number };
-  /** Legacy cron lock the service waits for at startup (default account migration). */
-  legacyLockDir?: string;
 }
 
 const ID_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
@@ -81,6 +85,7 @@ export function loadConfig(path: string): Config {
       redMin: num(a.redMin, defaults.redMin, `accounts[${i}].redMin`, 0),
       rtWarnDays: num(a.rtWarnDays, defaults.rtWarnDays, `accounts[${i}].rtWarnDays`, 0),
       usagePollMin: num(a.usagePollMin, defaults.usagePollMin, `accounts[${i}].usagePollMin`, 1),
+      legacyLockDir: a.legacyLockDir ? absPath(String(a.legacyLockDir), `accounts[${i}].legacyLockDir`) : undefined,
     });
   }
   let alert: Config['alert'];
@@ -115,8 +120,6 @@ export function loadConfig(path: string): Config {
       fiveHourPct: num(t.fiveHourPct, 80, 'usageThresholds.fiveHourPct'),
       projectedPct: num(t.projectedPct, 100, 'usageThresholds.projectedPct'),
     },
-    legacyLockDir: raw.legacyLockDir === null ? undefined
-      : absPath(String(raw.legacyLockDir ?? '~/.botmux/logs/.cred-refresh.lock'), 'legacyLockDir'),
   };
 }
 
