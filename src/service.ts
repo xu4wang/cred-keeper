@@ -159,7 +159,8 @@ export class Service {
     if (a.busy) return; // a refresh from an earlier tick is still running
     try {
       if (!a.flushUnsaved()) return;
-      if ((await a.recoverPending()) === 'unresolved') return;
+      const rec = await a.recoverPending();
+      if (rec === 'unresolved' || rec === 'locked') return;
       const cur = a.reconcile();
       if (!cur) return;
       this.rtWarn(a, cur.refreshTokenExpiresAt);

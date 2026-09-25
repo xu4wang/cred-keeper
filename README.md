@@ -23,7 +23,7 @@ npm ci --omit=dev
 - **Pending responses are never silently discarded.** On startup and on every tick, a pending response is:
   - applied, if it was made from the current vault
   - removed, if the vault already carries its access or refresh token (so it was applied earlier)
-  - otherwise kept, and the account goes `critical`, reported once per pending file. No new refresh is sent while a pending response is unresolved, because it may hold the only live refresh token. An operator resolves it with `cred-keeper pending <id> apply|discard --confirm <id>`.
+  - otherwise kept, and the account goes `critical`, reported once per pending file. No new refresh is sent while a pending response is unresolved, because it may hold the only live refresh token. An operator resolves it with `cred-keeper pending <id> apply|discard --confirm <id>`. If the response was not made from the current vault, `apply` also requires `--replace <current-vault-fingerprint>`, and it keeps the displaced credential aside as `vault/<id>.displaced-<ts>.json`. Everything that touches the pending file, the service's recovery included, runs under the account lock.
 - **Outcomes:**
   - network failure → retry, alert on the second consecutive failure
   - `invalid_grant` → `dead` (a human must log in again); never retried with the same refresh token
@@ -95,7 +95,7 @@ Examples in `examples/`:
 cred-keeper serve [--config <path>]
 cred-keeper status [id]
 cred-keeper refresh <id> --force --confirm <id>   # rotates the RT and revokes the current AT for every consumer
-cred-keeper pending <id> apply|discard --confirm <id>  # resolve a saved refresh response the service could not apply
+cred-keeper pending <id> apply|discard --confirm <id> [--replace <vault-fp>]  # resolve a saved refresh response the service could not apply
 cred-keeper doctor                                  # connectivity (expects 405), credential files, keychain split, scripts, contract, legacy cron
 cred-keeper alert-test
 cred-keeper install-service [--load]                # launchd (Background session) / systemd --user

@@ -2,7 +2,7 @@
  * One managed account: authoritative vault copy, publication to
  * credentialPath, refresh with pending-response recovery, onRefreshed hook.
  */
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import { rmSync } from 'node:fs';
 import type { AccountConfig, Config, Level } from './config.ts';
 import { paths } from './config.ts';
@@ -139,7 +139,14 @@ export class Account {
    *  - otherwise → keep it, go critical, a human decides
    * Returns 'none' | 'applied' | 'unresolved'.
    */
-  async recoverPending(): Promise<'none' | 'applied' | 'unresolved'> {
+  async recoverPending(holdingLock = false): Promise<'none' | 'applied' | 'unresolved' | 'locked'> {
+    if (!holdingLock) {
+      // Every consumer of the pending file runs under the account lock, so a
+      // manual `pending apply|discard` in another process cannot interleave.
+      const lockPath = this.p.lock(this.cfg.id);
+      if (!tryAcquire(lockPath)) return 'locked';
+      try { return await this.recoverPending(true); } finally { release(lockPath); }
+    }
     const pendingPath = this.p.pending(this.cfg.id);
     const text = readFileNoFollow(pendingPath);
     if (text === null) return 'none';
@@ -170,7 +177,19 @@ export class Account {
   }
 
   /** Human resolution of an unresolved pending response. Returns what happened. */
-  async resolvePending(action: 'apply' | 'discard'): Promise<string> {
+  /** Current vault fingerprint and the pending response's base, for the operator to compare. */
+  pendingInfo(): { vault: string | null; base: string | null; hasPending: boolean } {
+    const text = readFileNoFollow(this.p.pending(this.cfg.id));
+    const pending = text ? (parseJsonObject(text) as { base?: string } | null) : null;
+    return { vault: this.vault()?.fingerprint ?? null, base: pending?.base ?? null, hasPending: text !== null };
+  }
+
+  /**
+   * `replaceFingerprint` must name the current vault fingerprint when the pending
+   * response was not made from it: the operator acknowledges exactly which
+   * credential is being displaced. The displaced vault is always kept aside.
+   */
+  async resolvePending(action: 'apply' | 'discard', replaceFingerprint?: string): Promise<string> {
     const lockPath = this.p.lock(this.cfg.id);
     if (!tryAcquire(lockPath)) return 'locked';
     try {
@@ -185,7 +204,10 @@ export class Account {
       const body = pending && typeof pending.raw === 'string' ? (parseJsonObject(pending.raw) as TokenResponse | null) : null;
       const vault = this.vault() ?? (() => { const r = parseCred(readFileNoFollow(this.cfg.credentialPath)); return r.ok ? r.cred : null; })();
       if (!body || !vault) return 'unparseable';
-      // Force-apply onto whatever credential structure we have (base check waived by the operator).
+      const base = (pending as { base?: string }).base;
+      if (base !== vault.fingerprint && replaceFingerprint !== vault.fingerprint) return 'base_mismatch';
+      // Keep the credential being displaced: it may hold the live RT.
+      writeFileAtomic0600(join(dirname(this.p.vault(this.cfg.id)), `${this.cfg.id}.displaced-${this.now()}.json`), JSON.stringify(vault.raw));
       const merged = mergeTokenResponse(vault, body, typeof pending!.at === 'number' ? pending!.at : this.now());
       if (!merged) return 'unusable';
       this.refreshing = true;
@@ -291,7 +313,7 @@ export class Account {
       if (!this.flushUnsaved()) return 'persist_failed';
       // Never send a new refresh while a persisted response is unresolved:
       // it may hold the only live RT.
-      if ((await this.recoverPending()) === 'unresolved') return 'pending_unresolved';
+      if ((await this.recoverPending(true)) === 'unresolved') return 'pending_unresolved';
       const cur = this.reconcile();
       if (!cur) return 'breaker';
       if ((this.state === 'dead' || this.state === 'critical') && this.stuckFingerprint === cur.fingerprint && !force) return this.state;

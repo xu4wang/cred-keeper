@@ -152,12 +152,23 @@ test('pending recovery: applied from base; already-applied or superseded removed
   await a.recoverPending();
   await a.recoverPending();
   assert.equal(svc.store.events({ type: 'pending_unresolved', limit: 10 }).length, 1, 'reported once per pending content, not per tick');
-  assert.equal(await a.resolvePending('apply'), 'applied');
+  assert.equal(await a.resolvePending('apply'), 'base_mismatch', 'must name the credential being displaced');
+  const displacedFp = a.vault()!.fingerprint;
+  assert.equal(await a.resolvePending('apply', displacedFp), 'applied');
   assert.match(readFileSync(credPath, 'utf-8'), /RT-x/);
+  const vdir = dirname(p.vault('a1'));
+  const displaced = (await import('node:fs')).readdirSync(vdir).filter((n) => n.includes('.displaced-'));
+  assert.equal(displaced.length, 1, 'the displaced vault is kept aside');
+  assert.match(readFileSync(join(vdir, displaced[0]), 'utf-8'), /RT-rec/);
   assert.equal(existsSync(p.pending('a1')), false);
   pend('oldbase', { access_token: 'AT-z', refresh_token: 'RT-z', expires_in: 1 });
   assert.equal(await a.resolvePending('discard'), 'discarded');
   assert.equal(existsSync(p.pending('a1')), false);
+  // another process holds the account lock → the service's recovery skips this tick
+  pend('oldbase2', { access_token: 'AT-l', refresh_token: 'RT-l', expires_in: 1 });
+  writeFileSync(p.lock('a1'), JSON.stringify({ pid: process.ppid, start: null }));
+  assert.equal(await a.recoverPending(), 'locked');
+  rmSync(p.lock('a1'));
 });
 
 test('pending cannot be persisted → the new credential is still applied', async () => {

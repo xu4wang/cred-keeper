@@ -11,7 +11,7 @@ const USAGE = `usage: cred-keeper <command> [--config <path>]
   serve                              run the service (launchd / systemd calls this)
   status [id]                        query the running service
   refresh <id> --force --confirm <id>  force a refresh (rotates the RT, revokes the old AT)
-  pending <id> apply|discard --confirm <id>  resolve a saved refresh response the service could not apply
+  pending <id> apply|discard --confirm <id> [--replace <vault-fp>]  resolve a saved refresh response the service could not apply
   doctor                             environment and configuration checks
   alert-test                         send a test event through the alert script
   install-service [--load]           write (and optionally load) the service definition`;
@@ -74,8 +74,14 @@ async function main(): Promise<number> {
       const svc = new Service(configPath);
       const a = svc.accounts.get(id);
       if (!a) { console.error(`unknown account ${id}`); return 2; }
-      const r = await a.resolvePending(action);
+      const r = await a.resolvePending(action, arg('--replace'));
       await svc.alerter.drain();
+      if (r === 'base_mismatch') {
+        const info = a.pendingInfo();
+        console.error(`the saved response was made from credential ${info.base}, but the vault now holds ${info.vault}.\n`
+          + `applying it replaces ${info.vault} (kept aside as a .displaced file). To proceed, add: --replace ${info.vault}`);
+        return 1;
+      }
       console.log(r);
       return r === 'applied' || r === 'discarded' ? 0 : 1;
     }
