@@ -94,6 +94,8 @@ test('config: loopback only, id format, alert level', () => {
   assert.throws(() => loadConfig(w({ listen: '0.0.0.0:1', accounts: [] })), /loopback/);
   assert.throws(() => loadConfig(w({ accounts: [{ id: 'Bad Id', credentialPath: '/x' }] })), /id must match/);
   assert.throws(() => loadConfig(w({ accounts: [{ id: 'a', credentialPath: 'rel' }] })), /absolute/);
+  assert.throws(() => loadConfig(w({ accounts: [{ id: 'a', credentialPath: '/x' }, { id: 'b', credentialPath: '/x' }] })), /used by another account/);
+  assert.throws(() => loadConfig(w({ listen: '127.0.0.1:99999', accounts: [] })), /port/);
   assert.throws(() => loadConfig(w({ accounts: [], alert: { script: '/x', minLevel: 'loud' } })), /minLevel/);
   const c = loadConfig(w({ accounts: [{ id: 'a', credentialPath: '/x' }], alert: { script: '/s' } }));
   assert.equal(c.alert?.minLevel, 'error', 'default alert level is error');
@@ -106,4 +108,13 @@ test('project: linear extrapolation, undefined early in the window', () => {
   assert.equal(project({ utilization: 50, resetsAt: new Date(end).toISOString(), locked: null }, len, end - len / 2), 100);
   assert.equal(project({ utilization: 1, resetsAt: new Date(end).toISOString(), locked: null }, len, end - len + 60_000), null);
   assert.equal(project({ utilization: null, resetsAt: new Date(end).toISOString(), locked: null }, len, end - len / 2), null);
+});
+
+test('systemd quoting and launchd plist', async () => {
+  const { systemdQuote, systemdUnit, launchdPlist } = await import('../src/install.ts');
+  assert.equal(systemdQuote('/a b/%h"x\\'), '"/a b/%%h\\"x\\\\"');
+  assert.match(systemdUnit('/n', '/c d.ts', '/cfg'), /ExecStart="\/n" "\/c d.ts" "serve" "--config" "\/cfg"/);
+  const pl = launchdPlist('/n', '/c.ts', '/cfg', '/logs');
+  assert.match(pl, /<key>LimitLoadToSessionType<\/key><string>Background<\/string>/);
+  assert.match(pl, /<string>\/n<\/string>/);
 });

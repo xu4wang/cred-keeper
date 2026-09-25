@@ -32,7 +32,8 @@ export class FakeAnthropic {
           this.tokenRequests.push(JSON.parse(body));
           const r = this.tokenReplies.shift() ?? { status: 500, body: { error: 'no reply queued' } };
           if (r === 'hangup') { req.socket.destroy(); return; }
-          res.writeHead(r.status, { 'content-type': 'application/json' }).end(JSON.stringify(r.body));
+          const raw = (r.body as { __raw?: string } | null)?.__raw;
+          res.writeHead(r.status, { 'content-type': 'application/json' }).end(raw ?? JSON.stringify(r.body));
           return;
         }
         if (path === '/api/oauth/usage') {

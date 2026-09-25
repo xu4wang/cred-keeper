@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import {
-  closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync,
+  closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
@@ -28,7 +28,8 @@ export function readFileNoFollow(path: string): string | null {
   try {
     fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return null;
     throw e;
   }
   try {
@@ -53,15 +54,36 @@ export function writeFileAtomic0600(path: string, body: string): void {
   try {
     try {
       writeFileSync(fd, body);
+      fsyncSync(fd); // data durable before the rename makes it visible
     } finally {
       closeSync(fd);
     }
     assertRealDir(parent);
     renameSync(tmp, path);
+    fsyncDir(parent); // the rename itself durable
   } catch (e) {
     rmSync(tmp, { force: true });
     throw e;
   }
+}
+
+function fsyncDir(dir: string): void {
+  let fd: number | undefined;
+  try {
+    fd = openSync(dir, constants.O_RDONLY);
+    fsyncSync(fd);
+  } catch {
+    /* some filesystems refuse fsync on directories; the file itself is synced */
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+/** Token-shaped strings (Claude OAuth access/refresh tokens) and known secrets → [redacted]. */
+export function redact(text: string, known: readonly string[] = []): string {
+  let out = text.replace(/sk-ant-[a-z]{2,4}\d{2}-[A-Za-z0-9_-]{8,}/g, '[redacted]');
+  for (const k of known) if (k && k.length >= 8) out = out.split(k).join('[redacted]');
+  return out;
 }
 
 function assertRealDir(dir: string): void {

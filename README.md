@@ -19,7 +19,11 @@ npm ci --omit=dev
 - **Vault.** Each account keeps an authoritative copy at `<dataDir>/vault/<id>.json` (0600). `credentialPath` is only the published copy that consumers read. Every minute the two are compared:
   - published file cleared, corrupt, logged out, or older than the vault → republish it from the vault
   - published file newer (for example, a human logged in again) → adopt it as the new vault
-- **Refresh.** When the access token has `marginMin` minutes or less left (plus 0–5 minutes of jitter), it calls `POST /v1/oauth/token`. The raw response is saved to `<dataDir>/pending/` before parsing. Then the vault is updated, then the published file (the old one kept as `.prev`), both by atomic 0600 rename. Finally the account's `onRefreshed` script runs. If the service crashes midway, the pending response is applied on the next start.
+- **Refresh.** When the access token has `marginMin` minutes or less left (plus 0–5 minutes of jitter), it calls `POST /v1/oauth/token`. On HTTP 200 the raw response text is saved byte-for-byte to `<dataDir>/pending/` before parsing. Then the vault is updated, then the published file (the old one kept as `.prev`). Every write is an atomic 0600 rename with fsync of both the file and its directory. Finally the account's `onRefreshed` script runs. If the pending file cannot be written, the credential is still applied. If the vault cannot be written, the credential is held in memory and written again every minute.
+- **Pending responses are never silently discarded.** On startup and on every tick, a pending response is:
+  - applied, if it was made from the current vault
+  - removed, if the vault already carries its access token, or holds a credential that expires later than the response would
+  - otherwise kept, and the account goes `critical`. No new refresh is sent while a pending response is unresolved, because it may hold the only live refresh token.
 - **Outcomes:**
   - network failure → retry, alert on the second consecutive failure
   - `invalid_grant` → `dead` (a human must log in again); never retried with the same refresh token
@@ -27,7 +31,8 @@ npm ci --omit=dev
   - 200 with unknown fields → `critical`, the pending response is kept
 - **Usage.** Calls `GET /api/oauth/usage` with header `anthropic-beta: oauth-2025-04-20` every `usagePollMin` minutes. Stores the 5-hour and 7-day windows and projects each window to its end linearly.
 - **Locks.** One lock per account, held only while that account is refreshing. The lock records the holder's pid and process start time, so a crashed holder, or an unrelated process that later reuses the pid, is detected as stale.
-- **Secrets.** Tokens never appear in argv, env, logs, events, or API responses; only 12-hex-digit sha256 fingerprints do. Script stdout/stderr goes to `<dataDir>/logs/scripts.log` and never into the API.
+- **Secrets.** Tokens never appear in argv, env, events, or API responses; only 12-hex-digit sha256 fingerprints do. Script stdout/stderr goes only to `<dataDir>/logs/scripts.log` (0600), never into the API. Before it is written there, the output is scrubbed of the account's current tokens and of anything token-shaped (`sk-ant-…`). Scrubbing is a safety net: scripts should still not print credentials.
+- **One account per credential file.** The config refuses two accounts sharing a `credentialPath`.
 
 ## Configuration (`~/.cred-keeper/config.json`)
 

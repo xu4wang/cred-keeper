@@ -47,7 +47,7 @@ export function loadConfig(path: string): Config {
   const raw = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, any>;
   const listen = String(raw.listen ?? '127.0.0.1:8790');
   const m = /^([0-9.]+|localhost|\[[0-9a-f:]+\]):(\d{1,5})$/i.exec(listen);
-  if (!m) throw new Error(`listen must be host:port, got ${listen}`);
+  if (!m || Number(m[2]) > 65535) throw new Error(`listen must be host:port (port 0-65535), got ${listen}`);
   const host = m[1];
   if (!['127.0.0.1', 'localhost', '[::1]'].includes(host)) {
     throw new Error('listen must be a loopback address; expose it through a reverse proxy (nginx) instead');
@@ -61,16 +61,20 @@ export function loadConfig(path: string): Config {
   };
   const accounts: AccountConfig[] = [];
   const seen = new Set<string>();
+  const seenPaths = new Set<string>();
   for (const [i, a] of ((raw.accounts ?? []) as Record<string, any>[]).entries()) {
     const id = String(a.id ?? '');
     if (!ID_RE.test(id)) throw new Error(`accounts[${i}].id must match ${ID_RE}`);
     if (seen.has(id)) throw new Error(`duplicate account id ${id}`);
     seen.add(id);
     if ((a.provider ?? 'claude-oauth') !== 'claude-oauth') throw new Error(`accounts[${i}].provider must be claude-oauth`);
+    const credentialPath = absPath(String(a.credentialPath ?? ''), `accounts[${i}].credentialPath`);
+    if (seenPaths.has(credentialPath)) throw new Error(`accounts[${i}]: credentialPath ${credentialPath} is used by another account`);
+    seenPaths.add(credentialPath);
     accounts.push({
       id,
       provider: 'claude-oauth',
-      credentialPath: absPath(String(a.credentialPath ?? ''), `accounts[${i}].credentialPath`),
+      credentialPath,
       onRefreshed: a.onRefreshed ? absPath(String(a.onRefreshed), `accounts[${i}].onRefreshed`) : undefined,
       hookTimeoutSec: num(a.hookTimeoutSec, 60, `accounts[${i}].hookTimeoutSec`, 1),
       marginMin: num(a.marginMin, defaults.marginMin, `accounts[${i}].marginMin`, 1),

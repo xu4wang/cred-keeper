@@ -29,7 +29,11 @@ async function main(): Promise<number> {
       const svc = new Service(configPath);
       await startApi(svc);
       process.on('SIGHUP', () => svc.reload());
-      const stop = () => { svc.stop(); void svc.alerter.drain().finally(() => process.exit(0)); };
+      // Give in-flight alerts a short grace period, not their whole retry/backoff schedule.
+      const stop = () => {
+        svc.stop();
+        void Promise.race([svc.alerter.drain(), new Promise((r) => setTimeout(r, 10_000))]).finally(() => process.exit(0));
+      };
       process.on('SIGTERM', stop);
       process.on('SIGINT', stop);
       await svc.start();

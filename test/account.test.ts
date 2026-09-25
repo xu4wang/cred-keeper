@@ -1,6 +1,6 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { join } from 'node:path';
 import { Service } from '../src/service.ts';
@@ -13,6 +13,7 @@ after(() => fake.stop());
 
 const HOUR = 3600_000;
 function setup(opts: { hook?: string; alert?: string; expIn?: number; minLevel?: string } = {}) {
+  fake.tokenReplies.length = 0;
   const d = tmp();
   const extra: Record<string, unknown> = {};
   const accounts = [{ id: 'a1', credentialPath: join(d, 'acct', '.credentials.json'), onRefreshed: opts.hook, hookTimeoutSec: 5 }];
@@ -124,19 +125,92 @@ test('reconcile table: cleared/older → republish from vault; newer → adopt; 
   assert.ok(t.includes('adopted') && t.includes('breaker'));
 });
 
-test('startup recovery: pending response applied when based on the current vault; stale pending discarded', async () => {
+test('pending recovery: applied from base; already-applied or superseded removed; unrelated kept and blocks refresh', async () => {
   const { svc, a, credPath, p } = setup();
   const vault = a.reconcile()!;
   mkdirSync(dirname(p.pending('a1')), { recursive: true });
-  writeFileSync(p.pending('a1'), JSON.stringify({ base: vault.fingerprint, at: Date.now(), body: { access_token: 'AT-rec', refresh_token: 'RT-rec', expires_in: 100 } }));
-  assert.equal(await a.recoverPending(), true);
+  const pend = (base: string, body: unknown, at = Date.now()) =>
+    writeFileSync(p.pending('a1'), JSON.stringify({ base, at, raw: JSON.stringify(body) }));
+  pend(vault.fingerprint, { access_token: 'AT-rec', refresh_token: 'RT-rec', expires_in: 100 });
+  assert.equal(await a.recoverPending(), 'applied');
   const pub = parseCred(readFileSync(credPath, 'utf-8'));
   assert.ok(pub.ok && pub.cred.refreshToken === 'RT-rec');
   assert.equal(existsSync(p.pending('a1')), false);
   assert.ok(types(svc).includes('recovered_pending'));
-  writeFileSync(p.pending('a1'), JSON.stringify({ base: 'deadbeefdead', at: Date.now(), body: { access_token: 'X', expires_in: 1 } }));
-  assert.equal(await a.recoverPending(), false);
-  assert.equal(existsSync(p.pending('a1')), false, 'pending based on an older vault is discarded');
+  pend('whatever', { access_token: 'AT-rec', expires_in: 100 });
+  assert.equal(await a.recoverPending(), 'none', 'vault already carries this AT → applied earlier');
+  assert.equal(existsSync(p.pending('a1')), false);
+  pend('oldbase', { access_token: 'AT-x', refresh_token: 'RT-x', expires_in: 1 }, Date.now() - HOUR);
+  assert.equal(await a.recoverPending(), 'none', 'vault expires after the response would → superseded');
+  assert.equal(existsSync(p.pending('a1')), false);
+  pend('oldbase', { access_token: 'AT-y', refresh_token: 'RT-LIVE', expires_in: 99_999 });
+  assert.equal(await a.recoverPending(), 'unresolved');
+  assert.ok(existsSync(p.pending('a1')), 'possibly the only live RT: never deleted');
+  assert.equal(a.state, 'critical');
+  const n = fake.tokenRequests.length;
+  assert.equal(await a.refresh(true), 'pending_unresolved');
+  assert.equal(fake.tokenRequests.length, n, 'no new refresh while a pending response is unresolved');
+});
+
+test('pending cannot be persisted → the new credential is still applied', async () => {
+  const { svc, a, credPath, p } = setup();
+  writeFileSync(dirname(p.pending('a1')), 'not a dir'); // makes the pending write fail
+  fake.tokenReplies.push({ status: 200, body: { access_token: 'AT-np', refresh_token: 'RT-np', expires_in: 100 } });
+  assert.equal(await a.refresh(), 'refreshed');
+  assert.match(readFileSync(credPath, 'utf-8'), /RT-np/);
+  assert.ok(types(svc).includes('persist_failed'));
+});
+
+test('vault cannot be written → kept in memory, flushed on a later tick', async () => {
+  const { svc, a, credPath, p } = setup();
+  a.reconcile();
+  const vdir = dirname(p.vault('a1'));
+  chmodSync(vdir, 0o500);
+  fake.tokenReplies.push({ status: 200, body: { access_token: 'AT-mem', refresh_token: 'RT-mem', expires_in: 28800 } });
+  try {
+    assert.equal(await a.refresh(), 'persist_failed');
+    assert.equal(a.state, 'critical');
+    assert.ok(a.unsaved?.includes('RT-mem'));
+  } finally {
+    chmodSync(vdir, 0o700);
+  }
+  await svc.tick();
+  assert.equal(a.unsaved, null);
+  assert.match(readFileSync(credPath, 'utf-8'), /RT-mem/);
+  assert.match(readFileSync(p.vault('a1'), 'utf-8'), /RT-mem/);
+  assert.equal(a.state, 'ok');
+});
+
+test('raw 200 body is persisted verbatim, even when it is not valid JSON', async () => {
+  const { a, p } = setup();
+  const rawText = '{"access_token":"AT-trunc","refresh_token":"RT-trunc"'; // truncated: not JSON
+  fake.tokenReplies.push({ status: 200, body: { __raw: rawText } });
+  assert.equal(await a.refresh(), 'critical');
+  const pend = JSON.parse(readFileSync(p.pending('a1'), 'utf-8'));
+  assert.equal(pend.raw, rawText, 'kept byte-for-byte so a human can still recover the RT');
+});
+
+test('a stuck state clears when another process refreshed (vault and file both moved on)', async () => {
+  const { a, credPath, p } = setup();
+  fake.tokenReplies.push({ status: 400, body: { error: 'invalid_grant' } });
+  await a.refresh();
+  assert.equal(a.state, 'dead');
+  const next = credText('AT-cli', 'RT-cli', Date.now() + 7 * HOUR);
+  writeFileSync(p.vault('a1'), next); // what `cred-keeper refresh` in another process leaves behind
+  writeFileSync(credPath, next);
+  a.reconcile();
+  assert.equal(a.state, 'ok');
+});
+
+test('a stuck state clears when a newer login is adopted', async () => {
+  const { a, credPath } = setup();
+  fake.tokenReplies.push({ status: 400, body: { error: 'invalid_grant' } });
+  await a.refresh();
+  assert.equal(a.state, 'dead');
+  // e.g. `cred-keeper refresh` in another process, or a login published to the file
+  writeFileSync(credPath, credText('AT-other', 'RT-other', Date.now() + 7 * HOUR));
+  a.reconcile();
+  assert.equal(a.state, 'ok');
 });
 
 test('hook: one retry within budget, then hook_failed (critical)', async () => {
@@ -157,6 +231,13 @@ test('hook: one retry within budget, then hook_failed (critical)', async () => {
   assert.equal(ev.data.attempts, 2);
   assert.equal(ev.data.code, 3);
   assert.equal(JSON.stringify(ev).includes('exit'), false, 'no script output in events');
+  const leaky = script(d0, 'leaky.sh', 'cat "$CK_CREDENTIAL_PATH"; echo sk-ant-ort01-abcdefghijklmnop');
+  s = setup({ hook: leaky });
+  fake.tokenReplies.push({ status: 200, body: { access_token: 'AT-leak-123456', refresh_token: 'RT-leak-123456', expires_in: 100 } });
+  await s.a.refresh();
+  const log = readFileSync(join(s.p.logDir, 'scripts.log'), 'utf-8');
+  assert.doesNotMatch(log, /AT-leak-123456|RT-leak-123456|sk-ant-ort01-abcdefghijklmnop/);
+  assert.match(log, /\[redacted\]/);
 });
 
 test('alerts: minLevel filter, dedupe per episode, reset on recovery, undelivered after retries', async () => {
@@ -178,6 +259,7 @@ test('alerts: minLevel filter, dedupe per episode, reset on recovery, undelivere
   await s2.a.refresh();
   await s2.svc.alerter.drain();
   assert.equal(s2.svc.store.events({ type: 'alert_undelivered', limit: 5 }).length, 1);
+  assert.equal(s2.svc.store.db.prepare("SELECT count(*) AS n FROM kv WHERE k LIKE 'alert:%'").get()!.n, 0, 'dedupe key released after non-delivery');
 });
 
 test('no alert script → nothing is executed, event still recorded', async () => {

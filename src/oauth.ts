@@ -38,11 +38,12 @@ export class Http {
 }
 
 /**
- * `onBody` is invoked with the raw response text BEFORE any parsing, so the
- * caller can persist it (the RT may already be rotated server-side).
+ * On HTTP 200 the raw response text is returned unparsed-first (`bodyText`) so
+ * the caller persists exactly what the server sent: the RT may already be
+ * rotated server-side. Persistence is the caller's job and is deliberately
+ * outside this function's network error handling.
  */
-export async function refreshToken(http: Http, url: string, clientId: string, refreshTokenValue: string,
-  onBody: (text: string) => void): Promise<RefreshOutcome> {
+export async function refreshToken(http: Http, url: string, clientId: string, refreshTokenValue: string): Promise<RefreshOutcome> {
   let res: Awaited<ReturnType<Http['request']>>;
   let text: string;
   try {
@@ -56,7 +57,6 @@ export async function refreshToken(http: Http, url: string, clientId: string, re
     return { kind: 'network', error: (e as Error).message };
   }
   if (res.status === 200) {
-    onBody(text);
     try {
       const body = JSON.parse(text) as TokenResponse;
       if (body && typeof body === 'object') return { kind: 'ok', status: 200, bodyText: text, body };

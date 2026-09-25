@@ -2,7 +2,8 @@
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const LABEL = 'com.cred-keeper';
 
@@ -36,13 +37,18 @@ ${args}
 `;
 }
 
+/** systemd ExecStart word quoting: double quotes, backslash escapes, `%` → `%%` (specifiers). */
+export function systemdQuote(s: string): string {
+  return `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/%/g, '%%')}"`;
+}
+
 export function systemdUnit(nodeBin: string, cliPath: string, configPath: string): string {
   return `[Unit]
 Description=cred-keeper: OAuth credential refresh and usage monitor
 After=network-online.target
 
 [Service]
-ExecStart=${nodeBin} ${cliPath} serve --config ${configPath}
+ExecStart=${[nodeBin, cliPath, 'serve', '--config', configPath].map(systemdQuote).join(' ')}
 Restart=always
 RestartSec=30
 Environment=PATH=/usr/bin:/bin
@@ -55,7 +61,7 @@ WantedBy=default.target
 /** Writes the service definition. `load` also loads it (real side effect). */
 export function installService(configPath: string, logDir: string, load: boolean): { path: string; next: string } {
   const nodeBin = process.execPath; // absolute: no PATH dependence (nvm)
-  const cliPath = resolve(new URL('./cli.ts', import.meta.url).pathname);
+  const cliPath = fileURLToPath(new URL('./cli.ts', import.meta.url));
   if (process.platform === 'darwin') {
     const dir = join(homedir(), 'Library', 'LaunchAgents');
     mkdirSync(dir, { recursive: true });

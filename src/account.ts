@@ -35,8 +35,8 @@ export class Account {
   /** A refresh_failed (error-level) was emitted in the current failure episode. */
   failureAlerted = false;
   lastRefresh: AccountStatus['lastRefresh'] = null;
-  /** Fingerprint of the vault copy we last saw dead (invalid_grant); cleared when it changes. */
-  deadFingerprint: string | null = null;
+  /** Vault fingerprint the current dead/critical state applies to; a different vault clears it. */
+  stuckFingerprint: string | null = null;
   jitterMs: number;
   private refreshing = false;
 
@@ -99,14 +99,26 @@ export class Account {
       this.state = 'ok';
       this.emit(this.cfg.id, 'recovered', 'info', { from: 'breaker' });
     }
+    if ((this.state === 'dead' || this.state === 'critical') && this.stuckFingerprint !== null
+        && vault.fingerprint !== this.stuckFingerprint && !this.unsaved) {
+      // The vault moved on (another process refreshed, or a login was adopted).
+      this.emit(this.cfg.id, 'recovered', 'info', { from: this.state });
+      this.state = 'ok';
+      this.failures = 0;
+      this.stuckFingerprint = null;
+    }
     if (pub.ok && pub.cred.fingerprint === vault.fingerprint) return vault;
-    if (pub.ok && pub.cred.expiresAt > vault.expiresAt) {
+    // A different, valid file that is at least as fresh wins (a human login or a
+    // consumer's own successful refresh). Ties go to the file: a tie with a
+    // different token can only come from a fresh login, not from our history.
+    if (pub.ok && pub.cred.expiresAt >= vault.expiresAt) {
       this.writeVault(pubText!);
       this.emit(this.cfg.id, 'adopted', 'warn', { from: vault.fingerprint, to: pub.cred.fingerprint });
       if (this.state === 'dead' || this.state === 'critical') {
         this.emit(this.cfg.id, 'recovered', 'info', { from: this.state });
         this.state = 'ok';
         this.failures = 0;
+        this.stuckFingerprint = null;
       }
       return pub.cred;
     }
@@ -118,33 +130,82 @@ export class Account {
     return vault;
   }
 
-  /** Complete a refresh whose response was persisted but not applied (crash between request and rename). */
-  async recoverPending(): Promise<boolean> {
+  /**
+   * Resolve a persisted-but-unapplied refresh response (crash between the
+   * request and the vault write). Never deleted unless provably applied:
+   * it may hold the only copy of a rotated RT.
+   *  - vault already carries the response's access token → applied, delete
+   *  - response was made from the current vault → apply it now
+   *  - otherwise → keep it, go critical, a human decides
+   *  - the vault holds a credential expiring no earlier than the response would → superseded, delete
+ * Returns 'none' | 'applied' | 'unresolved'.
+   */
+  async recoverPending(): Promise<'none' | 'applied' | 'unresolved'> {
     const pendingPath = this.p.pending(this.cfg.id);
     const text = readFileNoFollow(pendingPath);
-    if (text === null) return false;
-    const pending = parseJsonObject(text) as { base?: string; body?: TokenResponse; at?: number } | null;
+    if (text === null) return 'none';
+    const pending = parseJsonObject(text) as { base?: string; at?: number; raw?: string } | null;
+    const body = pending && typeof pending.raw === 'string' ? (parseJsonObject(pending.raw) as TokenResponse | null) : null;
     const vault = this.vault();
-    const baseOk = pending && vault && pending.base === vault.fingerprint && pending.body && typeof pending.at === 'number';
-    const merged = baseOk ? mergeTokenResponse(vault!, pending!.body!, pending!.at!) : null;
+    if (vault && body && typeof body.access_token === 'string' && body.access_token === vault.accessToken) {
+      rmSync(pendingPath, { force: true }); // already applied
+      return 'none';
+    }
+    const pendingExpiry = pending && typeof pending.at === 'number' && body ? pending.at + Number(body.expires_in) * 1000 : NaN;
+    if (vault && Number.isFinite(pendingExpiry) && vault.expiresAt >= pendingExpiry && pending!.base !== vault.fingerprint) {
+      // The vault holds a credential issued after this response (a later login or
+      // a consumer's later refresh), so this response is superseded.
+      rmSync(pendingPath, { force: true });
+      this.emit(this.cfg.id, 'pending_superseded', 'warn', { vault: vault.fingerprint });
+      return 'none';
+    }
+    const merged = vault && body && pending!.base === vault.fingerprint && typeof pending!.at === 'number'
+      ? mergeTokenResponse(vault, body, pending!.at!) : null;
     if (!merged) {
-      // Not applicable to the current vault (already applied, or garbage). Keep it only if it could matter.
-      if (pending && vault && pending.base !== vault.fingerprint) {
-        rmSync(pendingPath, { force: true }); // vault moved on: it was applied or superseded
-        return false;
-      }
-      this.state = 'critical';
-      this.emit(this.cfg.id, 'critical_unknown_response', 'critical', { stage: 'recovery', pendingPath });
-      return false;
+      this.setStuck('critical', vault?.fingerprint ?? null);
+      this.emit(this.cfg.id, 'critical_unknown_response', 'critical', {
+        stage: 'recovery', pendingPath, baseMatches: !!vault && pending?.base === vault.fingerprint, parsed: !!body,
+      });
+      return 'unresolved';
     }
     await this.apply(merged.text, merged.rotatedRt, 'recovered_pending');
-    return true;
+    return 'applied';
+  }
+
+  /** Best effort: a leftover pending file is resolved later by recoverPending (it is provably applied). */
+  private removePending(): void {
+    try { rmSync(this.p.pending(this.cfg.id), { force: true }); } catch { /* resolved on a later tick */ }
+  }
+
+  /** Enter dead/critical, remembering which vault fingerprint it applies to. */
+  private setStuck(state: 'dead' | 'critical', fp: string | null): void {
+    this.state = state;
+    this.stuckFingerprint = fp;
+  }
+
+  /** A merged credential we could not persist yet (disk error): retried every tick. */
+  unsaved: string | null = null;
+
+  /** Retry persisting an in-memory credential; true when nothing is left unsaved. */
+  flushUnsaved(): boolean {
+    if (!this.unsaved) return true;
+    try {
+      this.writeVault(this.unsaved);
+      this.publish(this.unsaved);
+      this.removePending();
+      this.unsaved = null;
+      this.state = 'ok';
+      this.emit(this.cfg.id, 'recovered', 'info', { from: 'persist_failed' });
+      return true;
+    } catch (e) {
+      return false;
+    }
   }
 
   private async apply(text: string, rotatedRt: boolean, how: 'refreshed' | 'recovered_pending'): Promise<void> {
     this.writeVault(text);
     this.publish(text);
-    rmSync(this.p.pending(this.cfg.id), { force: true });
+    this.removePending();
     const cred = parseCred(text);
     const fp = cred.ok ? cred.cred.fingerprint : null;
     this.state = 'ok';
@@ -168,14 +229,15 @@ export class Account {
       CK_RT_EXPIRES_AT: cred?.refreshTokenExpiresAt ? nowIso(cred.refreshTokenExpiresAt) : '',
     };
     const deadline = this.now() + this.cfg.hookTimeoutSec * 1000;
+    const known = cred ? [cred.accessToken, cred.refreshToken] : [];
     let r = await runScript({ script: this.cfg.onRefreshed, env, timeoutMs: this.cfg.hookTimeoutSec * 1000,
-      logDir: this.p.logDir, label: `onRefreshed:${this.cfg.id}` });
+      logDir: this.p.logDir, label: `onRefreshed:${this.cfg.id}`, redactKnown: known });
     let attempts = 1;
     const remaining = deadline - this.now();
     if (!succeeded(r) && !r.timedOut && remaining > 1000) {
       attempts = 2;
       r = await runScript({ script: this.cfg.onRefreshed, env, timeoutMs: remaining,
-        logDir: this.p.logDir, label: `onRefreshed:${this.cfg.id}#2` });
+        logDir: this.p.logDir, label: `onRefreshed:${this.cfg.id}#2`, redactKnown: known });
     }
     const data = { code: r.code, signal: r.signal, timedOut: r.timedOut, ms: r.ms, attempts, error: r.error };
     if (succeeded(r)) this.emit(this.cfg.id, 'hook_ok', 'info', data);
@@ -199,39 +261,50 @@ export class Account {
     if (!tryAcquire(lockPath)) return 'locked';
     this.refreshing = true;
     try {
+      if (!this.flushUnsaved()) return 'persist_failed';
+      // Never send a new refresh while a persisted response is unresolved:
+      // it may hold the only live RT.
+      if ((await this.recoverPending()) === 'unresolved') return 'pending_unresolved';
       const cur = this.reconcile();
       if (!cur) return 'breaker';
-      if (this.state === 'dead' && this.deadFingerprint === cur.fingerprint && !force) return 'dead';
+      if ((this.state === 'dead' || this.state === 'critical') && this.stuckFingerprint === cur.fingerprint && !force) return this.state;
       if (!force && !this.isDue(cur)) return 'not_due';
       const left = this.leftMin(cur) ?? 0;
       this.state = 'refreshing';
       const pendingPath = this.p.pending(this.cfg.id);
-      ensureDir0700(dirname(pendingPath));
       const at = this.now();
-      const out = await refreshToken(this.http, this.global.endpoints.token, this.global.clientId, cur.refreshToken,
-        (text) => {
-          const body = parseJsonObject(text);
-          writeFileAtomic0600(pendingPath, JSON.stringify({ base: cur.fingerprint, at, body }));
-        });
-      switch (out.kind) {
-        case 'ok': {
-          const merged = mergeTokenResponse(cur, out.body, at);
-          if (!merged) {
-            this.state = 'critical';
-            this.failures++;
-            this.emit(this.cfg.id, 'critical_unknown_response', 'critical', {
-              keys: Object.keys(out.body ?? {}).sort(), pendingPath,
-            });
-            return 'critical';
-          }
-          await this.apply(merged.text, merged.rotatedRt, 'refreshed');
-          return 'refreshed';
+      const out = await refreshToken(this.http, this.global.endpoints.token, this.global.clientId, cur.refreshToken);
+      if (out.kind === 'ok' || out.kind === 'unparseable_200') {
+        // The RT is rotated server-side from here on. Persist the raw response
+        // first; if that fails, keep going in memory and retry every tick.
+        let pendingSaved = true;
+        try {
+          ensureDir0700(dirname(pendingPath));
+          writeFileAtomic0600(pendingPath, JSON.stringify({ base: cur.fingerprint, at, raw: out.bodyText }));
+        } catch (e) {
+          pendingSaved = false;
+          this.emit(this.cfg.id, 'persist_failed', 'critical', { stage: 'pending', error: (e as Error).message });
         }
-        case 'unparseable_200':
-          this.state = 'critical';
+        const merged = out.kind === 'ok' ? mergeTokenResponse(cur, out.body, at) : null;
+        if (!merged) {
+          this.setStuck('critical', cur.fingerprint);
           this.failures++;
-          this.emit(this.cfg.id, 'critical_unknown_response', 'critical', { pendingPath });
+          this.emit(this.cfg.id, 'critical_unknown_response', 'critical', {
+            keys: out.kind === 'ok' ? Object.keys(out.body ?? {}).sort() : [], pendingPath: pendingSaved ? pendingPath : null,
+          });
           return 'critical';
+        }
+        try {
+          await this.apply(merged.text, merged.rotatedRt, 'refreshed');
+        } catch (e) {
+          this.unsaved = merged.text;
+          this.setStuck('critical', cur.fingerprint);
+          this.emit(this.cfg.id, 'persist_failed', 'critical', { stage: 'vault', error: (e as Error).message, pendingSaved });
+          return 'persist_failed';
+        }
+        return 'refreshed';
+      }
+      switch (out.kind) {
         case 'network': {
           this.state = 'retrying';
           this.failures++;
@@ -242,8 +315,7 @@ export class Account {
           return 'network';
         }
         case 'invalid_grant':
-          this.state = 'dead';
-          this.deadFingerprint = cur.fingerprint;
+          this.setStuck('dead', cur.fingerprint);
           this.failures++;
           this.emit(this.cfg.id, 'rt_dead', 'critical', { status: out.status, leftMin: left });
           return 'dead';

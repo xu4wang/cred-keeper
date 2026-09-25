@@ -121,7 +121,7 @@ export class Service {
     const legacy = this.cfg.legacyLockDir;
     while (legacy && legacyLockLive(legacy)) await new Promise((r) => setTimeout(r, 5000));
     for (const a of this.accounts.values()) {
-      try { a.reconcile(); await a.recoverPending(); } catch (e) {
+      try { await a.recoverPending(); a.reconcile(); } catch (e) {
         this.emit(a.cfg.id, 'internal_error', 'error', { stage: 'startup', error: (e as Error).message });
       }
     }
@@ -131,7 +131,19 @@ export class Service {
 
   stop(): void { if (this.timer) clearInterval(this.timer); }
 
+  private ticking = false;
+
   async tick(): Promise<void> {
+    if (this.ticking) return; // previous tick still running (slow refresh / hook / usage call)
+    this.ticking = true;
+    try {
+      await this.tickInner();
+    } finally {
+      this.ticking = false;
+    }
+  }
+
+  private async tickInner(): Promise<void> {
     try {
       const m = statSync(this.configPath).mtimeMs;
       if (m !== this.cfgMtime || this.reloadPending) { this.cfgMtime = m; this.reload(); }
@@ -144,7 +156,10 @@ export class Service {
   }
 
   private async tickAccount(a: Account): Promise<void> {
+    if (a.busy) return; // a refresh from an earlier tick is still running
     try {
+      if (!a.flushUnsaved()) return;
+      if ((await a.recoverPending()) === 'unresolved') return;
       const cur = a.reconcile();
       if (!cur) return;
       this.rtWarn(a, cur.refreshTokenExpiresAt);
@@ -210,7 +225,7 @@ export class Service {
     const d = new Date(this.now());
     const hhmm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
     if (hhmm < hb) return;
-    const day = nowIso(this.now()).slice(0, 10);
+    const day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; // local day, same clock as hhmm
     if (this.store.get('heartbeat:last') === day) return;
     this.store.set('heartbeat:last', day);
     this.emit(null, 'heartbeat', 'info', {

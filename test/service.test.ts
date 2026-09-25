@@ -94,3 +94,11 @@ test('contract needles are present in the installed claude binary (read-only, sk
   const buf = readFileSync(process.env.CK_CLAUDE_BINARY!);
   for (const n of contractNeedles('9d1c250a-e61b-44d9-88ed-5944d1962f5e')) assert.notEqual(buf.indexOf(n), -1, n);
 });
+
+test('tick does not overlap itself', async () => {
+  const { svc } = setup(10 * HOUR);
+  (svc as unknown as { ticking: boolean }).ticking = true;
+  const n = fake.usageRequests.length;
+  await svc.tick();
+  assert.equal(fake.usageRequests.length, n);
+});

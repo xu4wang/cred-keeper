@@ -72,5 +72,7 @@ export class Alerter {
       if (attempt < BACKOFF_MS.length) await this.sleep(BACKOFF_MS[attempt]);
     }
     this.store.addEvent(ev.account, 'alert_undelivered', 'error', { forEvent: ev.eventId, type: ev.type });
+    // Not delivered: release the dedupe key so the next occurrence can try again.
+    this.store.db.prepare('DELETE FROM kv WHERE k = ?').run(`alert:${ev.account ?? '-'}:${ev.type}:${ev.dedupKey}`);
   }
 }

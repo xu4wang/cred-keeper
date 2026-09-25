@@ -7,7 +7,7 @@
 import { spawn } from 'node:child_process';
 import { appendFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { ensureDir0700, nowIso } from './util.ts';
+import { ensureDir0700, nowIso, redact } from './util.ts';
 
 export interface ScriptResult { code: number | null; signal: string | null; timedOut: boolean; ms: number; error?: string }
 
@@ -15,6 +15,8 @@ const TAIL = 4096;
 
 export function runScript(opts: {
   script: string; env: Record<string, string>; stdin?: string; timeoutMs: number; logDir: string; label: string;
+  /** Secrets to scrub from the captured output before it is logged. */
+  redactKnown?: readonly string[];
 }): Promise<ScriptResult> {
   const started = Date.now();
   return new Promise((resolve) => {
@@ -48,13 +50,21 @@ export function runScript(opts: {
       try {
         ensureDir0700(opts.logDir);
         appendFileSync(join(opts.logDir, 'scripts.log'),
-          `${nowIso()} ${opts.label} code=${r.code} signal=${r.signal} timedOut=${r.timedOut} ms=${r.ms}${r.error ? ` error=${r.error}` : ''}\n${out}\n---\n`,
+          `${nowIso()} ${opts.label} code=${r.code} signal=${r.signal} timedOut=${r.timedOut} ms=${r.ms}${r.error ? ` error=${r.error}` : ''}\n${redact(out, opts.redactKnown)}\n---\n`,
           { mode: 0o600 });
       } catch { /* logging is best effort */ }
       resolve(r);
     };
     child.on('error', (e) => done({ code: null, signal: null, timedOut, ms: Date.now() - started, error: e.message }));
-    child.on('close', (code, signal) => done({ code, signal, timedOut, ms: Date.now() - started }));
+    // 'exit', not 'close': a background descendant holding stdout open must not
+    // turn a finished script into a timeout. Give stdio a moment to flush.
+    child.on('exit', (code, signal) => {
+      setTimeout(() => {
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        done({ code, signal, timedOut, ms: Date.now() - started });
+      }, 100);
+    });
   });
 }
 
