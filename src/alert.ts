@@ -54,7 +54,9 @@ export class Alerter {
 
   /** End every open episode for an account (all types deduped by the 'episode' key). */
   resetEpisodes(account: string): void {
-    this.store.db.prepare("DELETE FROM kv WHERE k LIKE ? AND k LIKE '%:episode'").run(`alert:${account}:%`);
+    // Exact prefix match (substr), not LIKE: account ids may contain '_', a LIKE wildcard.
+    const prefix = `alert:${account}:`;
+    this.store.db.prepare("DELETE FROM kv WHERE substr(k, 1, ?) = ? AND substr(k, -8) = ':episode'").run(prefix.length, prefix);
   }
 
   drain(): Promise<void> { return this.queue; }

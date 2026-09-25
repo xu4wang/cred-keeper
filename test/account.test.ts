@@ -464,3 +464,12 @@ test('contract_drift alerts once per binary signature, not once forever', async 
   await svc.alerter.drain();
   assert.equal(readFileSync(log, 'utf-8').trim().split('\n').length, 2);
 });
+
+test('resetEpisodes is exact per account (an _ in an id is not a wildcard)', async () => {
+  const { svc } = setup();
+  svc.store.set('alert:a_b:x:episode', '1');
+  svc.store.set('alert:axb:x:episode', '1');
+  svc.alerter.resetEpisodes('a_b');
+  assert.equal(svc.store.get('alert:a_b:x:episode'), undefined);
+  assert.equal(svc.store.get('alert:axb:x:episode'), '1');
+});
