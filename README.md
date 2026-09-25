@@ -114,7 +114,7 @@ The service runs as a **LaunchDaemon** (system domain, `UserName` = you, with `H
 
 ```sh
 cred-keeper keychain-sentinel --config …     # once, from a normal login session
-cred-keeper install-service --config …       # writes <dataDir>/../com.cred-keeper.plist and prints:
+cred-keeper install-service --config …       # writes <dataDir>/com.cred-keeper.plist and prints:
 sudo install -o root -g wheel -m 644 <plist> /Library/LaunchDaemons/com.cred-keeper.plist
 sudo launchctl bootstrap system /Library/LaunchDaemons/com.cred-keeper.plist
 curl -s 127.0.0.1:<port>/healthz              # keychainGate should be "active"

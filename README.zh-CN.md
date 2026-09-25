@@ -120,7 +120,7 @@ cred-keeper install-service [--load]                # macOS：生成 LaunchDaemo
 
 ```sh
 cred-keeper keychain-sentinel --config …     # 在普通登录会话里执行一次
-cred-keeper install-service --config …       # 生成 <dataDir>/../com.cred-keeper.plist，并打印下面的命令：
+cred-keeper install-service --config …       # 生成 <dataDir>/com.cred-keeper.plist，并打印下面的命令：
 sudo install -o root -g wheel -m 644 <plist> /Library/LaunchDaemons/com.cred-keeper.plist
 sudo launchctl bootstrap system /Library/LaunchDaemons/com.cred-keeper.plist
 curl -s 127.0.0.1:<port>/healthz              # keychainGate 应为 "active"
