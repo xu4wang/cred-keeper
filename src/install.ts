@@ -84,6 +84,7 @@ export function installService(configPath: string, logDir: string, load: boolean
   if (process.platform === 'darwin') {
     const user = { name: userInfo().username, home: homedir() };
     const path = join(dirname(logDir), `${LABEL}.plist`);
+    mkdirSync(logDir, { recursive: true, mode: 0o700 }); // fresh install: data/logs may not exist yet (launchd needs the log dir)
     writeFileSync(path, launchdPlist(nodeBin, cliPath, configPath, logDir, user), { mode: 0o644 });
     const target = `/Library/LaunchDaemons/${LABEL}.plist`;
     const q = (x: string) => `'${x.replace(/'/g, `'\\''`)}'`;
