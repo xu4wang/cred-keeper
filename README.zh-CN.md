@@ -43,7 +43,7 @@ npm ci --omit=dev
 - **一个凭证文件只能属于一个账号。** 配置里如果两个账号共用同一个 `credentialPath`，会直接被拒绝。
 - **覆盖之前一定留底。** 收编更新的文件时，被替换的副本另存为 `vault/<id>.displaced-*.json`；重新发布覆盖损坏的文件时，把损坏的文件另存为 `vault/<id>.quarantine-*.json`。
 - **旧 cron 的锁。** 配置了 `legacyLockDir` 的账号（迁移期间的 default 账号），每次刷新时也会按旧脚本的协议（mkdir + pid）持有旧锁。所以即使 cron 还没停，两边也不可能同时刷新同一个 RT。服务只在锁目录不存在时才去拿锁；遇到陈旧的锁也绝不自己清理或接管，因为这会和旧脚本自己的清理逻辑产生竞态。陈旧的锁会阻止刷新，并触发 `legacy_lock_stale` 告警（每小时最多一次），由人工删除。
-- **keychain 分裂闸门（macOS）。** 刷新之前先检查 claude 在 keychain 里有没有这份凭证的条目：`~/.claude` 对应 `Claude Code-credentials`，其他目录对应 `Claude Code-credentials-<目录 sha256 前 8 位>`。如果条目存在，claude 读的是 keychain 而不是我们刷新的文件，所以拒绝刷新并告警。只检查是否存在，而且总是在明确指定的 login keychain 里查。LaunchDaemon 不一定看得到这个 keychain，所以服务启动时会查找一个哨兵条目（用 `cred-keeper keychain-sentinel` 创建），并在 `/healthz` 的 `keychainGate` 里报告结果：`active`，或者 `unavailable`（同时告警）。只有 `active` 时闸门才生效，绝不会假装在检查。
+- **keychain 分裂闸门（macOS）。** 刷新之前先检查 claude 在 keychain 里有没有这份凭证的条目：`~/.claude` 对应 `Claude Code-credentials`，其他目录对应 `Claude Code-credentials-<目录 sha256 前 8 位>`。如果条目存在，claude 读的是 keychain 而不是我们刷新的文件，所以拒绝刷新并告警。只检查是否存在，而且总是在明确指定的 login keychain 里查。LaunchDaemon 不一定看得到这个 keychain，所以服务启动时会查找一个哨兵条目（用 `cred-keeper keychain-sentinel` 创建），并在 `/healthz` 的 `keychainGate` 里报告结果：`active`，或者 `unavailable`（同时告警）。只有 `active` 时闸门才生效，绝不会假装在检查。这是有意选择的 fail-open：哨兵不可见期间（例如开机后还没人登录时），刷新照常进行但跳过分裂检查，每次都会触发 `keychain_gate_unavailable` 告警。如果改成 fail-closed，在有人登录之前服务将完全无法刷新，AT 会过期。所以 `keychain_gate_unavailable` 持续出现时，必须有人去处理。
 
 ## 配置（`~/.cred-keeper/config.json`）
 
