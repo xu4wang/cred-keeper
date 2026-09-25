@@ -193,6 +193,10 @@ test('vault cannot be written → kept in memory, flushed on a later tick', asyn
   } finally {
     chmodSync(vdir, 0o700);
   }
+  writeFileSync(p.lock('a1'), JSON.stringify({ pid: process.ppid, start: null })); // another process holds the lock
+  assert.equal(a.flushUnsaved(), false, 'never touches vault/pending without the account lock');
+  assert.doesNotMatch(readFileSync(credPath, 'utf-8'), /RT-mem/);
+  rmSync(p.lock('a1'));
   await svc.tick();
   assert.equal(a.unsaved, null);
   assert.match(readFileSync(credPath, 'utf-8'), /RT-mem/);

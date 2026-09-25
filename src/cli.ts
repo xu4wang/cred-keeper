@@ -77,7 +77,7 @@ async function main(): Promise<number> {
       const r = await a.resolvePending(action, arg('--replace'));
       await svc.alerter.drain();
       if (r === 'base_mismatch') {
-        const info = a.pendingInfo();
+        const info = a.lastMismatch!;
         console.error(`the saved response was made from credential ${info.base}, but the vault now holds ${info.vault}.\n`
           + `applying it replaces ${info.vault} (kept aside as a .displaced file). To proceed, add: --replace ${info.vault}`);
         return 1;

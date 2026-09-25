@@ -4,6 +4,7 @@
  */
 import { dirname, join } from 'node:path';
 import { rmSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import type { AccountConfig, Config, Level } from './config.ts';
 import { paths } from './config.ts';
 import { mergeTokenResponse, parseCred, type OauthCred, type TokenResponse } from './cred.ts';
@@ -177,13 +178,6 @@ export class Account {
   }
 
   /** Human resolution of an unresolved pending response. Returns what happened. */
-  /** Current vault fingerprint and the pending response's base, for the operator to compare. */
-  pendingInfo(): { vault: string | null; base: string | null; hasPending: boolean } {
-    const text = readFileNoFollow(this.p.pending(this.cfg.id));
-    const pending = text ? (parseJsonObject(text) as { base?: string } | null) : null;
-    return { vault: this.vault()?.fingerprint ?? null, base: pending?.base ?? null, hasPending: text !== null };
-  }
-
   /**
    * `replaceFingerprint` must name the current vault fingerprint when the pending
    * response was not made from it: the operator acknowledges exactly which
@@ -205,9 +199,13 @@ export class Account {
       const vault = this.vault() ?? (() => { const r = parseCred(readFileNoFollow(this.cfg.credentialPath)); return r.ok ? r.cred : null; })();
       if (!body || !vault) return 'unparseable';
       const base = (pending as { base?: string }).base;
-      if (base !== vault.fingerprint && replaceFingerprint !== vault.fingerprint) return 'base_mismatch';
+      if (base !== vault.fingerprint && replaceFingerprint !== vault.fingerprint) {
+        this.lastMismatch = { base: base ?? null, vault: vault.fingerprint }; // read under the lock
+        return 'base_mismatch';
+      }
       // Keep the credential being displaced: it may hold the live RT.
-      writeFileAtomic0600(join(dirname(this.p.vault(this.cfg.id)), `${this.cfg.id}.displaced-${this.now()}.json`), JSON.stringify(vault.raw));
+      writeFileAtomic0600(join(dirname(this.p.vault(this.cfg.id)),
+        `${this.cfg.id}.displaced-${this.now()}-${randomBytes(4).toString('hex')}.json`), JSON.stringify(vault.raw));
       const merged = mergeTokenResponse(vault, body, typeof pending!.at === 'number' ? pending!.at : this.now());
       if (!merged) return 'unusable';
       this.refreshing = true;
@@ -231,13 +229,20 @@ export class Account {
   }
 
   private pendingReported: string | null = null;
+  /** base/vault pair observed under the lock by the last `base_mismatch`. */
+  lastMismatch: { base: string | null; vault: string } | null = null;
 
   /** A merged credential we could not persist yet (disk error): retried every tick. */
   unsaved: string | null = null;
 
-  /** Retry persisting an in-memory credential; true when nothing is left unsaved. */
-  flushUnsaved(): boolean {
+  /** Retry persisting an in-memory credential; true when nothing is left unsaved. Runs under the account lock. */
+  flushUnsaved(holdingLock = false): boolean {
     if (!this.unsaved) return true;
+    if (!holdingLock) {
+      const lockPath = this.p.lock(this.cfg.id);
+      if (!tryAcquire(lockPath)) return false;
+      try { return this.flushUnsaved(true); } finally { release(lockPath); }
+    }
     try {
       this.writeVault(this.unsaved);
       this.publish(this.unsaved);
@@ -310,7 +315,7 @@ export class Account {
     if (!tryAcquire(lockPath)) return 'locked';
     this.refreshing = true;
     try {
-      if (!this.flushUnsaved()) return 'persist_failed';
+      if (!this.flushUnsaved(true)) return 'persist_failed';
       // Never send a new refresh while a persisted response is unresolved:
       // it may hold the only live RT.
       if ((await this.recoverPending(true)) === 'unresolved') return 'pending_unresolved';
