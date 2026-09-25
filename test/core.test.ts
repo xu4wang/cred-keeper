@@ -178,5 +178,6 @@ test('legacy lock: a stale dir re-taken by a live holder right before our claim 
   writeFileSync(join(dir, 'pid'), '999999'); // dead holder → stale
   const ok = acquireLegacy(dir, Date.now(), () => writeFileSync(join(dir, 'pid'), String(process.ppid))); // cron re-took it
   assert.equal(ok, false);
-  assert.equal(readFileSync(join(dir, 'pid'), 'utf-8'), String(process.ppid), 'the live holder still has its lock in place');
+  assert.equal(existsSync(dir), false, 'never renamed back (that could clobber a freshly created lock)');
+  assert.equal(acquireLegacy(dir), false, 'and we keep off the lock while that holder is alive');
 });

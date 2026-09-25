@@ -77,19 +77,28 @@ export function release(path: string): void {
  *
  * Stale = recorded pid is dead, or no/garbage pid and the dir is older than
  * 2 minutes (a holder that crashed between mkdir and writing its pid). A stale
- * dir is first claimed by an atomic rename, then inspected: if what we claimed
- * turns out to be a live holder's fresh lock (it re-created the dir in the
- * meantime), it is put back and we back off.
+ * dir is first claimed by an atomic rename, then inspected. If what we claimed
+ * turns out to be a live holder's fresh lock, we never rename it back (that
+ * could replace a directory another holder just created); instead we leave it
+ * aside and refuse to take the lock ourselves for as long as that pid lives.
  */
+const legacyBlockers = new Set<number>();
+
 export function acquireLegacy(dir: string, now = Date.now(), beforeClaim?: () => void): boolean {
+  for (const pid of legacyBlockers) {
+    if (pidAlive(pid)) return false;
+    legacyBlockers.delete(pid);
+  }
   if (legacyLockLive(dir)) return false;
   if (legacyStale(dir, now)) {
     const claimed = `${dir}.stale-${process.pid}-${randomBytes(4).toString('hex')}`;
     beforeClaim?.(); // test seam: the race window between the staleness check and the claim
     try { renameSync(dir, claimed); } catch { return false; } // someone else moved it: retry next tick
     if (legacyLockLive(claimed) || !legacyStale(claimed, now)) {
-      try { renameSync(claimed, dir); } catch { /* the holder already re-created it; it keeps its own */ }
-      return false;
+      let pid = 0;
+      try { pid = Number(readFileSync(`${claimed}/pid`, 'utf-8').trim()) || 0; } catch { /* mid-acquire */ }
+      if (pid > 0) legacyBlockers.add(pid);
+      return false; // the claimed dir stays aside; the holder's own trap cleanup is harmless
     }
     rmSync(claimed, { recursive: true, force: true });
   }
