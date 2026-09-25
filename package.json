@@ -1,0 +1,20 @@
+{
+  "name": "cred-keeper",
+  "version": "0.1.0",
+  "description": "Refresh multiple local OAuth credentials, monitor usage, expose a read-only REST API.",
+  "type": "module",
+  "license": "MIT",
+  "engines": { "node": ">=24" },
+  "bin": { "cred-keeper": "bin/cred-keeper" },
+  "scripts": {
+    "test": "node --disable-warning=ExperimentalWarning --test --test-concurrency=1 'test/*.test.ts'",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "undici": "^7.16.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}
