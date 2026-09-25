@@ -71,18 +71,20 @@ export class Service {
 
   emit: Emit = (account, type, level, data = {}) => {
     const id = this.store.addEvent(account, type, level, data);
-    if (type === 'recovered') {
-      const from = String(data.from ?? '');
-      for (const t of from === 'breaker' ? ['breaker'] : from === 'refresh_failed' ? ['refresh_failed'] : ['rt_dead', 'critical_unknown_response']) {
-        this.alerter.reset(account, t);
-      }
+    // An account that is healthy again ends every open "episode" for it: the next
+    // occurrence of any episode-keyed problem must alert again.
+    if (account && (type === 'refreshed' || type === 'recovered_pending' || type === 'adopted' || type === 'recovered')) {
+      this.alerter.resetEpisodes(account);
     }
     const dedupKey = type === 'rt_expiring' ? `${nowIso(this.now()).slice(0, 10)}|${String(data.rtExpiresAt)}`
       : type === 'usage_high' || type === 'usage_locked' ? `${String(data.window)}|${String(data.resetsAt)}`
       : type === 'heartbeat' ? nowIso(this.now()).slice(0, 10)
       : type === 'republished' ? nowIso(this.now()).slice(0, 13) // at most one alert per hour
       : type === 'legacy_lock_stale' || type === 'keychain_gate_unavailable' ? `${level}|${nowIso(this.now()).slice(0, 13)}`
+      : type === 'contract_drift' ? `${String(data.binary)}|${JSON.stringify(data.missing ?? data.error ?? '')}|${this.store.get('audit:sig') ?? ''}`
+      : type === 'internal_error' ? nowIso(this.now()).slice(0, 13)
       : type === 'recovered' || type === 'hook_failed' ? String(id)
+      : account === null ? nowIso(this.now()).slice(0, 13) // no account → no recovery to end an episode: hourly
       : 'episode';
     this.alerter.offer({ eventId: id, type, level, account, title: title(type, account, data), message: JSON.stringify(data), dedupKey, data });
   };

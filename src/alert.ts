@@ -52,9 +52,9 @@ export class Alerter {
     return true;
   }
 
-  /** Allow the same (account, type) to alert again, e.g. after recovery. */
-  reset(account: string | null, type: string): void {
-    this.store.db.prepare('DELETE FROM kv WHERE k LIKE ?').run(`alert:${account ?? '-'}:${type}:%`);
+  /** End every open episode for an account (all types deduped by the 'episode' key). */
+  resetEpisodes(account: string): void {
+    this.store.db.prepare("DELETE FROM kv WHERE k LIKE ? AND k LIKE '%:episode'").run(`alert:${account}:%`);
   }
 
   drain(): Promise<void> { return this.queue; }

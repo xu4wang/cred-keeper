@@ -432,3 +432,35 @@ test('invalid_grant right after a network failure is annotated as a likely in-tr
   const ev = svc.store.events({ type: 'rt_dead', limit: 1 })[0];
   assert.match(String(ev.data.likelyCause), /lost in transit/);
 });
+
+test('episode alerts re-arm after the account is healthy again (trigger → recover → trigger alerts twice)', async () => {
+  const d0 = tmp();
+  const log = join(d0, 'alerts.log');
+  const alert = script(d0, 'alert.sh', `echo "$CK_EVENT" >> ${log}; cat > /dev/null`);
+  const { svc, a } = setup({ alert });
+  a.gateProbe = () => 'active';
+  a.keychainProbe = () => true;
+  await a.refresh(); // split → alert
+  await a.refresh(); // same episode → deduped
+  a.keychainProbe = () => false;
+  fake.tokenReplies.push({ status: 200, body: { access_token: 'AT-ep', expires_in: 100 } });
+  assert.equal(await a.refresh(), 'refreshed'); // healthy again → episodes end
+  a.keychainProbe = () => true;
+  await a.refresh(); // new episode → alert again
+  await svc.alerter.drain();
+  assert.deepEqual(readFileSync(log, 'utf-8').trim().split('\n').filter((l) => l === 'keychain_split'), ['keychain_split', 'keychain_split']);
+});
+
+test('contract_drift alerts once per binary signature, not once forever', async () => {
+  const d0 = tmp();
+  const log = join(d0, 'alerts.log');
+  const alert = script(d0, 'alert.sh', `echo "$CK_EVENT" >> ${log}; cat > /dev/null`);
+  const { svc } = setup({ alert });
+  svc.store.set('audit:sig', 'v1');
+  svc.emit(null, 'contract_drift', 'error', { binary: '/b', missing: ['x'] });
+  svc.emit(null, 'contract_drift', 'error', { binary: '/b', missing: ['x'] });
+  svc.store.set('audit:sig', 'v2'); // claude upgraded, drifted again
+  svc.emit(null, 'contract_drift', 'error', { binary: '/b', missing: ['x'] });
+  await svc.alerter.drain();
+  assert.equal(readFileSync(log, 'utf-8').trim().split('\n').length, 2);
+});
