@@ -52,6 +52,10 @@ export const SENTINEL_SERVICE = 'cred-keeper-keychain-sentinel';
 
 export type GateState = 'active' | 'unavailable' | 'not-applicable';
 
+/** Monotonic probe sequence: orders probes even within the same millisecond. */
+let probeSeq = 0;
+export function nextProbeSeq(): number { return ++probeSeq; }
+
 export function probeKeychainGate(keychain = loginKeychainPath()): GateState {
   if (process.platform !== 'darwin') return 'not-applicable';
   return keychainItemExists(SENTINEL_SERVICE, keychain) === true ? 'active' : 'unavailable';

@@ -9,7 +9,7 @@ import type { AccountConfig, Config, Level } from './config.ts';
 import { paths } from './config.ts';
 import { mergeTokenResponse, parseCred, type OauthCred, type TokenResponse } from './cred.ts';
 import { acquireLegacy, legacyStale, release, releaseLegacy, tryAcquire } from './lock.ts';
-import { keychainItemExists, keychainServiceFor, probeKeychainGate, type GateState } from './keychain.ts';
+import { keychainItemExists, keychainServiceFor, nextProbeSeq, probeKeychainGate, type GateState } from './keychain.ts';
 import { refreshToken, type Http } from './oauth.ts';
 import { runScript, succeeded } from './scripts.ts';
 import { ensureDir0700, fingerprint, nowIso, parseJsonObject, readFileNoFollow, writeFileAtomic0600 } from './util.ts';
@@ -306,6 +306,7 @@ export class Account {
   /** Set by the service after its startup probe; only 'active' makes the split check meaningful. */
   /** Result of the most recent on-the-spot gate probe (reported in /healthz). */
   keychainGate: GateState = 'not-applicable';
+  /** Probe sequence number (not a time) of keychainGate. */
   keychainGateAt = 0;
   /** Injectable for tests; production uses the real `security` lookups. */
   keychainProbe: (service: string) => boolean | null = keychainItemExists;
@@ -434,7 +435,7 @@ export class Account {
       // invisible, and become visible later. The split answer is trusted only when
       // the sentinel is visible in this very attempt.
       this.keychainGate = this.gateProbe();
-      this.keychainGateAt = this.now();
+      this.keychainGateAt = nextProbeSeq();
       if (this.keychainGate === 'unavailable') {
         this.emit(this.cfg.id, 'keychain_gate_unavailable', 'error', {
           hint: 'the split check cannot see the login keychain right now; run `cred-keeper keychain-sentinel` from a login session if this persists',

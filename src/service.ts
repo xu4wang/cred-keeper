@@ -6,7 +6,7 @@ import { auditBinary } from './audit.ts';
 import { loadConfig, paths, type Config, type Level } from './config.ts';
 import { fetchUsage, Http, project, type UsageSnapshot } from './oauth.ts';
 import { Store } from './store.ts';
-import { probeKeychainGate, type GateState } from './keychain.ts';
+import { nextProbeSeq, probeKeychainGate, type GateState } from './keychain.ts';
 import { ensureDir0700, nowIso } from './util.ts';
 
 const FIVE_H = 5 * 3600_000;
@@ -135,7 +135,7 @@ export class Service {
   async start(): Promise<void> {
     if (!this.cfg.alert) this.store.addEvent(null, 'alerts_disabled', 'info', { reason: 'alert.script not configured' });
     this.startupGate = probeKeychainGate();
-    this.startupGateAt = this.now();
+    this.startupGateAt = nextProbeSeq();
     if (this.startupGate === 'unavailable') {
       // Recorded, not alerted: the alert comes (per account, hourly) from the
       // on-the-spot probe when a refresh actually depends on the gate.
