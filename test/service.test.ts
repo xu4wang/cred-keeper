@@ -102,3 +102,14 @@ test('tick does not overlap itself', async () => {
   await svc.tick();
   assert.equal(fake.usageRequests.length, n);
 });
+
+test('healthz keychainGate is the most recent probe, not config order', () => {
+  const { svc } = setup(10 * HOUR);
+  const s = svc as unknown as { startupGate: string; startupGateAt: number };
+  s.startupGate = 'active'; s.startupGateAt = 1;
+  const a = svc.accounts.get('a1')!;
+  a.keychainGate = 'unavailable'; a.keychainGateAt = 5;
+  assert.equal(svc.keychainGate, 'unavailable');
+  s.startupGateAt = 9;
+  assert.equal(svc.keychainGate, 'active');
+});

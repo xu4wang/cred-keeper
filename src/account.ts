@@ -306,6 +306,7 @@ export class Account {
   /** Set by the service after its startup probe; only 'active' makes the split check meaningful. */
   /** Result of the most recent on-the-spot gate probe (reported in /healthz). */
   keychainGate: GateState = 'not-applicable';
+  keychainGateAt = 0;
   /** Injectable for tests; production uses the real `security` lookups. */
   keychainProbe: (service: string) => boolean | null = keychainItemExists;
   gateProbe: () => GateState = probeKeychainGate;
@@ -406,8 +407,9 @@ export class Account {
       release(lockPath);
       if (legacyStale(legacy)) {
         const v = this.vault() ?? (() => { try { const r = parseCred(readFileNoFollow(this.cfg.credentialPath)); return r.ok ? r.cred : null; } catch { return null; } })();
-        const left = v ? Math.round((v.expiresAt - this.now()) / 60_000) : null;
-        const urgent = left !== null && left < this.cfg.redMin;
+        const leftMs = v ? v.expiresAt - this.now() : null;
+        const left = leftMs === null ? null : Math.round(leftMs / 60_000);
+        const urgent = leftMs !== null && leftMs < this.cfg.redMin * 60_000;
         this.emit(this.cfg.id, 'legacy_lock_stale', urgent ? 'critical' : 'error', {
           leftMin: left,
           dir: legacy, hint: 'a stale legacy cron lock blocks refreshing; if no cron refresh is running, remove it: rm -f <dir>/pid <dir>/alerted && rmdir <dir>',
@@ -432,6 +434,7 @@ export class Account {
       // invisible, and become visible later. The split answer is trusted only when
       // the sentinel is visible in this very attempt.
       this.keychainGate = this.gateProbe();
+      this.keychainGateAt = this.now();
       if (this.keychainGate === 'unavailable') {
         this.emit(this.cfg.id, 'keychain_gate_unavailable', 'error', {
           hint: 'the split check cannot see the login keychain right now; run `cred-keeper keychain-sentinel` from a login session if this persists',

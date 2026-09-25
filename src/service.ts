@@ -123,16 +123,23 @@ export class Service {
   /** Latest gate probe: the service's own startup probe, then each account's on-the-spot probes. */
   get keychainGate(): GateState {
     let latest: GateState = this.startupGate;
-    for (const a of this.accounts.values()) if (a.keychainGate !== 'not-applicable') latest = a.keychainGate;
+    let at = this.startupGateAt;
+    for (const a of this.accounts.values()) {
+      if (a.keychainGateAt > at) { latest = a.keychainGate; at = a.keychainGateAt; }
+    }
     return latest;
   }
+  private startupGateAt = 0;
   private startupGate: GateState = 'not-applicable';
 
   async start(): Promise<void> {
     if (!this.cfg.alert) this.store.addEvent(null, 'alerts_disabled', 'info', { reason: 'alert.script not configured' });
     this.startupGate = probeKeychainGate();
+    this.startupGateAt = this.now();
     if (this.startupGate === 'unavailable') {
-      this.emit(null, 'keychain_gate_unavailable', 'error', {
+      // Recorded, not alerted: the alert comes (per account, hourly) from the
+      // on-the-spot probe when a refresh actually depends on the gate.
+      this.store.addEvent(null, 'keychain_gate_unavailable', 'warn', {
         hint: 'the keychain split check cannot see the login keychain from this context; run `cred-keeper keychain-sentinel` in a login session, then restart the service',
       });
     }
