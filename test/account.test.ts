@@ -142,6 +142,10 @@ test('pending recovery: applied from base; already-applied or superseded removed
   assert.equal(existsSync(p.pending('a1')), false);
   pend('whatever', { access_token: 'AT-other', refresh_token: 'RT-rec', expires_in: 100 });
   assert.equal(await a.recoverPending(), 'none', 'vault already carries this RT → applied earlier');
+  pend('whatever', { access_token: 'AT-rec', refresh_token: 'RT-NEWER', expires_in: 100 });
+  assert.equal(await a.recoverPending(), 'unresolved', 'same AT but a different RT is NOT proof it was applied');
+  assert.ok(existsSync(p.pending('a1')));
+  rmSync(p.pending('a1'));
   pend('oldbase', { access_token: 'AT-x', refresh_token: 'RT-x', expires_in: 1 }, Date.now() - HOUR);
   assert.equal(await a.recoverPending(), 'unresolved', 'expiry ordering proves nothing about lineage: keep it');
   assert.ok(existsSync(p.pending('a1')), 'possibly the only live RT: never deleted automatically');
@@ -149,9 +153,10 @@ test('pending recovery: applied from base; already-applied or superseded removed
   const n = fake.tokenRequests.length;
   assert.equal(await a.refresh(true), 'pending_unresolved');
   assert.equal(fake.tokenRequests.length, n, 'no new refresh while a pending response is unresolved');
+  const before = svc.store.events({ type: 'pending_unresolved', limit: 10 }).length;
   await a.recoverPending();
   await a.recoverPending();
-  assert.equal(svc.store.events({ type: 'pending_unresolved', limit: 10 }).length, 1, 'reported once per pending content, not per tick');
+  assert.equal(svc.store.events({ type: 'pending_unresolved', limit: 10 }).length, before, 'reported once per pending content, not per tick');
   assert.equal(await a.resolvePending('apply'), 'base_mismatch', 'must name the credential being displaced');
   const displacedFp = a.vault()!.fingerprint;
   assert.equal(await a.resolvePending('apply', displacedFp), 'applied');

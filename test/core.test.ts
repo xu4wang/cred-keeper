@@ -37,7 +37,9 @@ test('mergeTokenResponse: rotation, keep-old rules, rejects', () => {
   assert.deepEqual(keep.claudeAiOauth.scopes, ['user:inference'], 'no scope → keep old scopes');
   assert.equal(mergeTokenResponse(cur.cred, { expires_in: 10 }, now), null);
   assert.equal(mergeTokenResponse(cur.cred, { access_token: 'AT2' }, now), null);
-  assert.equal(mergeTokenResponse(cur.cred, { access_token: 'AT1', expires_in: 10 }, now), null, 'unchanged AT is rejected');
+  assert.equal(mergeTokenResponse(cur.cred, { access_token: 'AT1', expires_in: 10 }, now), null, 'nothing new is rejected');
+  const reused = mergeTokenResponse(cur.cred, { access_token: 'AT1', refresh_token: 'RT9', expires_in: 10 }, now)!;
+  assert.equal(JSON.parse(reused.text).claudeAiOauth.refreshToken, 'RT9', 'reused AT with a rotated RT is applied');
 });
 
 test('writeFileAtomic0600: replaces a symlink instead of writing through it, forces 0600, refuses symlinked parent, no temp leftovers', () => {

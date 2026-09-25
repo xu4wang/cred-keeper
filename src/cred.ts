@@ -48,16 +48,17 @@ export interface TokenResponse {
  * Merge a token-endpoint response into the current credential (same rules as
  * the legacy bot-cred-refresh-oauth.sh): refresh_token / refresh_token_expires_in
  * / scope are replaced only when present; everything else is preserved.
- * Returns null when required fields are missing or the access token did not change.
+ * Returns null when required fields are missing, or when neither the access token nor the refresh token changed.
  */
 export function mergeTokenResponse(cur: OauthCred, r: TokenResponse, now: number): { text: string; rotatedRt: boolean } | null {
   if (typeof r.access_token !== 'string' || !r.access_token) return null;
   const expiresIn = Number(r.expires_in);
   if (!Number.isFinite(expiresIn) || expiresIn <= 0) return null;
-  if (r.access_token === cur.accessToken) return null;
+  const rotatedRt = typeof r.refresh_token === 'string' && r.refresh_token.length > 0 && r.refresh_token !== cur.refreshToken;
+  // Nothing new at all → not a usable refresh. A reused AT with a rotated RT is still new.
+  if (r.access_token === cur.accessToken && !rotatedRt) return null;
   const o: Record<string, unknown> = { ...(cur.raw.claudeAiOauth as Record<string, unknown>) };
   o.accessToken = r.access_token;
-  const rotatedRt = typeof r.refresh_token === 'string' && r.refresh_token.length > 0;
   if (rotatedRt) o.refreshToken = r.refresh_token;
   o.expiresAt = now + expiresIn * 1000;
   const rtIn = Number(r.refresh_token_expires_in);

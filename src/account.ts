@@ -172,8 +172,10 @@ export class Account {
       const pending = parseJsonObject(rec.text) as { base?: string; at?: number; raw?: string } | null;
       const body = pending && typeof pending.raw === 'string' ? (parseJsonObject(pending.raw) as TokenResponse | null) : null;
       const vault = this.vault();
-      if (vault && body && ((typeof body.access_token === 'string' && body.access_token === vault.accessToken)
-          || (typeof body.refresh_token === 'string' && body.refresh_token === vault.refreshToken))) {
+      // Applied iff the vault carries this response's RT (when it has one), else its AT.
+      const hasRt = !!body && typeof body.refresh_token === 'string' && body.refresh_token.length > 0;
+      if (vault && body && (hasRt ? body.refresh_token === vault.refreshToken
+          : typeof body.access_token === 'string' && body.access_token === vault.accessToken)) {
         this.removeRecord(rec.where); // provably applied: the vault carries this response's token
         continue;
       }
