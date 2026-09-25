@@ -24,7 +24,7 @@ function setup(opts: { hook?: string; alert?: string; expIn?: number; minLevel?:
   const svc = new Service(cfgPath, { alertSleep: async () => {} });
   const a = svc.accounts.get('a1')!;
   a.jitterMs = 0;
-  return { d, svc, a, credPath: accounts[0].credentialPath, p: paths(svc.cfg) };
+  return { d, svc, a, cfgPath, credPath: accounts[0].credentialPath, p: paths(svc.cfg) };
 }
 const types = (svc: Service) => svc.store.events({ limit: 100 }).map((e) => e.type).reverse();
 
@@ -193,6 +193,33 @@ test('pending falls back to an emergency location; with nowhere to write it is k
   assert.equal(await a.recoverPending(), 'unresolved');
   assert.equal(a.unsavedPending, null, 'persisted on the next attempt');
   assert.match(readFileSync(emergency, 'utf-8'), /RT-ONLY/);
+});
+
+test('pending records are judged one by one: resolving a stale one never deletes another', async () => {
+  const { svc, a, p } = setup();
+  const vault = a.reconcile()!;
+  mkdirSync(dirname(p.pending('a1')), { recursive: true });
+  // primary: already applied (vault carries its AT); emergency: a later, unrelated response
+  writeFileSync(p.pending('a1'), JSON.stringify({ base: 'x', at: 1, raw: JSON.stringify({ access_token: vault.accessToken, expires_in: 1 }) }));
+  const emergency = join(svc.cfg.dataDir, 'pending-emergency-a1.json');
+  writeFileSync(emergency, JSON.stringify({ base: 'other', at: 2, raw: JSON.stringify({ access_token: 'AT-e', refresh_token: 'RT-e', expires_in: 1 }) }));
+  assert.equal(await a.recoverPending(), 'unresolved');
+  assert.equal(existsSync(p.pending('a1')), false, 'the applied record is removed');
+  assert.ok(existsSync(emergency), 'the unresolved record survives');
+});
+
+test('config reload waits while an account holds memory-only state', async () => {
+  const { svc, cfgPath } = setup();
+  const a = svc.accounts.get('a1')!;
+  a.unsavedPending = JSON.stringify({ base: 'b', at: 1, raw: '{}' });
+  const cfg = JSON.parse(readFileSync(cfgPath, 'utf-8'));
+  cfg.accounts[0].credentialPath = join(tmp(), 'moved.json');
+  writeFileSync(cfgPath, JSON.stringify(cfg));
+  svc.reload();
+  assert.equal(svc.accounts.get('a1'), a, 'the Account holding the only copy is not replaced');
+  a.unsavedPending = null;
+  svc.reload();
+  assert.notEqual(svc.accounts.get('a1'), a);
 });
 
 test('tick skips reconciliation while another process holds the account lock', async () => {

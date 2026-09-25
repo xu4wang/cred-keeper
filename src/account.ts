@@ -13,6 +13,9 @@ import { refreshToken, type Http } from './oauth.ts';
 import { runScript, succeeded } from './scripts.ts';
 import { ensureDir0700, fingerprint, nowIso, parseJsonObject, readFileNoFollow, writeFileAtomic0600 } from './util.ts';
 
+/** Marker for a pending record that exists only in memory. */
+const MEMORY = '(memory)';
+
 export type State = 'ok' | 'due' | 'refreshing' | 'retrying' | 'dead' | 'critical' | 'breaker';
 
 export type Emit = (account: string | null, type: string, level: Level, data?: Record<string, unknown>) => void;
@@ -160,34 +163,39 @@ export class Account {
       const path = this.persistPending(this.unsavedPending);
       if (path) this.unsavedPending = null;
     }
-    const found = this.readPending();
-    if (!found && this.unsavedPending === null) return 'none';
-    const pendingPath = found?.path ?? '(memory only)';
-    const text = found?.text ?? this.unsavedPending!;
-    const pending = parseJsonObject(text) as { base?: string; at?: number; raw?: string } | null;
-    const body = pending && typeof pending.raw === 'string' ? (parseJsonObject(pending.raw) as TokenResponse | null) : null;
-    const vault = this.vault();
-    if (vault && body && ((typeof body.access_token === 'string' && body.access_token === vault.accessToken)
-        || (typeof body.refresh_token === 'string' && body.refresh_token === vault.refreshToken))) {
-      this.removePending(); // provably applied: the vault carries this response's token
-      return 'none';
-    }
-    const merged = vault && body && pending!.base === vault.fingerprint && typeof pending!.at === 'number'
-      ? mergeTokenResponse(vault, body, pending!.at!) : null;
-    if (!merged) {
+    // Every record is judged on its own: resolving one never deletes another.
+    const records = this.pendingRecords();
+    if (records.length === 0) return 'none';
+    let applied = false;
+    let unresolved = false;
+    for (const rec of records) {
+      const pending = parseJsonObject(rec.text) as { base?: string; at?: number; raw?: string } | null;
+      const body = pending && typeof pending.raw === 'string' ? (parseJsonObject(pending.raw) as TokenResponse | null) : null;
+      const vault = this.vault();
+      if (vault && body && ((typeof body.access_token === 'string' && body.access_token === vault.accessToken)
+          || (typeof body.refresh_token === 'string' && body.refresh_token === vault.refreshToken))) {
+        this.removeRecord(rec.where); // provably applied: the vault carries this response's token
+        continue;
+      }
+      const merged = vault && body && pending!.base === vault.fingerprint && typeof pending!.at === 'number'
+        ? mergeTokenResponse(vault, body, pending!.at!) : null;
+      if (merged) {
+        await this.apply(merged.text, merged.rotatedRt, 'recovered_pending', rec.where);
+        applied = true;
+        continue;
+      }
+      unresolved = true;
       this.setStuck('critical', vault?.fingerprint ?? null);
-      const key = fingerprint(text);
-      if (this.pendingReported !== key) { // once per pending content, not once per tick
-        this.pendingReported = key;
+      const key = fingerprint(rec.text);
+      if (!this.pendingReported.has(key)) { // once per pending content, not once per tick
+        this.pendingReported.add(key);
         this.emit(this.cfg.id, 'pending_unresolved', 'critical', {
-          pendingPath, baseMatches: !!vault && pending?.base === vault.fingerprint, parsed: !!body,
+          pendingPath: rec.where, baseMatches: !!vault && pending?.base === vault.fingerprint, parsed: !!body,
           hint: `inspect and resolve with: cred-keeper pending ${this.cfg.id} apply|discard --confirm ${this.cfg.id}`,
         });
       }
-      return 'unresolved';
     }
-    await this.apply(merged.text, merged.rotatedRt, 'recovered_pending');
-    return 'applied';
+    return unresolved ? 'unresolved' : applied ? 'applied' : 'none';
   }
 
   /** Human resolution of an unresolved pending response. Returns what happened. */
@@ -200,11 +208,11 @@ export class Account {
     const lockPath = this.p.lock(this.cfg.id);
     if (!tryAcquire(lockPath)) return 'locked';
     try {
-      const found = this.readPending();
-      const text = found?.text ?? this.unsavedPending;
-      if (text === null) return 'no_pending';
+      const rec = this.pendingRecords()[0]; // one record at a time, oldest first
+      if (!rec) return 'no_pending';
+      const text = rec.text;
       if (action === 'discard') {
-        this.removePending();
+        this.removeRecord(rec.where);
         this.emit(this.cfg.id, 'pending_discarded', 'warn', {});
         return 'discarded';
       }
@@ -223,7 +231,7 @@ export class Account {
       const merged = mergeTokenResponse(vault, body, typeof pending!.at === 'number' ? pending!.at : this.now());
       if (!merged) return 'unusable';
       this.refreshing = true;
-      try { await this.apply(merged.text, merged.rotatedRt, 'recovered_pending'); } finally { this.refreshing = false; }
+      try { await this.apply(merged.text, merged.rotatedRt, 'recovered_pending', rec.where); } finally { this.refreshing = false; }
       this.stuckFingerprint = null;
       return 'applied';
     } finally {
@@ -236,14 +244,18 @@ export class Account {
     return [this.p.pending(this.cfg.id), join(this.global.dataDir, `pending-emergency-${this.cfg.id}.json`)];
   }
 
-  /** The first existing pending file, if any. */
-  private readPending(): { path: string; text: string } | null {
+  /** All pending records (each location, plus a memory-only one), oldest response first. */
+  private pendingRecords(): { where: string; text: string }[] {
+    const out: { where: string; text: string; at: number }[] = [];
     for (const path of this.pendingPaths()) {
       let text: string | null;
       try { text = readFileNoFollow(path); } catch { text = null; } // not a regular file → no pending there
-      if (text !== null) return { path, text };
+      if (text !== null) out.push({ where: path, text, at: Number((parseJsonObject(text) as { at?: unknown } | null)?.at) || 0 });
     }
-    return null;
+    if (this.unsavedPending) {
+      out.push({ where: MEMORY, text: this.unsavedPending, at: Number((parseJsonObject(this.unsavedPending) as { at?: unknown } | null)?.at) || 0 });
+    }
+    return out.sort((a, b) => a.at - b.at);
   }
 
   /** A pending record we could not write anywhere yet: retried every tick. Lost only if the process dies too. */
@@ -261,12 +273,11 @@ export class Account {
     return null;
   }
 
-  /** Best effort: a leftover pending file is resolved later by recoverPending (it is provably applied). */
-  private removePending(): void {
-    for (const path of this.pendingPaths()) {
-      try { rmSync(path, { force: true }); } catch { /* resolved on a later tick */ }
-    }
-    this.unsavedPending = null;
+  /** Remove one pending record. Best effort: a leftover is provably applied and removed on a later tick. */
+  private removeRecord(where: string | null): void {
+    if (!where) return;
+    if (where === MEMORY) { this.unsavedPending = null; return; }
+    try { rmSync(where, { force: true }); } catch { /* resolved on a later tick */ }
   }
 
   /** Enter dead/critical, remembering which vault fingerprint it applies to. */
@@ -275,12 +286,17 @@ export class Account {
     this.stuckFingerprint = fp;
   }
 
-  private pendingReported: string | null = null;
+  private pendingReported = new Set<string>();
   /** base/vault pair observed under the lock by the last `base_mismatch`. */
   lastMismatch: { base: string | null; vault: string } | null = null;
 
   /** A merged credential we could not persist yet (disk error): retried every tick. */
   unsaved: string | null = null;
+  /** The pending record `unsaved` came from. */
+  private unsavedRecord: string | null = null;
+
+  /** True while this object holds state that exists nowhere on disk. */
+  get hasMemoryOnlyState(): boolean { return this.unsaved !== null || this.unsavedPending !== null; }
 
   /** Retry persisting an in-memory credential; true when nothing is left unsaved. Runs under the account lock. */
   flushUnsaved(holdingLock = false): boolean {
@@ -293,8 +309,9 @@ export class Account {
     try {
       this.writeVault(this.unsaved);
       this.publish(this.unsaved);
-      this.removePending();
+      this.removeRecord(this.unsavedRecord);
       this.unsaved = null;
+      this.unsavedRecord = null;
       this.state = 'ok';
       this.emit(this.cfg.id, 'recovered', 'info', { from: 'persist_failed' });
       return true;
@@ -303,10 +320,10 @@ export class Account {
     }
   }
 
-  private async apply(text: string, rotatedRt: boolean, how: 'refreshed' | 'recovered_pending'): Promise<void> {
+  private async apply(text: string, rotatedRt: boolean, how: 'refreshed' | 'recovered_pending', record: string | null): Promise<void> {
     this.writeVault(text);
     this.publish(text);
-    this.removePending();
+    this.removeRecord(record);
     const cred = parseCred(text);
     const fp = cred.ok ? cred.cred.fingerprint : null;
     this.state = 'ok';
@@ -394,9 +411,10 @@ export class Account {
           return 'critical';
         }
         try {
-          await this.apply(merged.text, merged.rotatedRt, 'refreshed');
+          await this.apply(merged.text, merged.rotatedRt, 'refreshed', savedAt ?? MEMORY);
         } catch (e) {
           this.unsaved = merged.text;
+          this.unsavedRecord = savedAt ?? MEMORY;
           this.setStuck('critical', cur.fingerprint);
           this.emit(this.cfg.id, 'persist_failed', 'critical', { stage: 'vault', error: (e as Error).message, pendingSaved });
           return 'persist_failed';

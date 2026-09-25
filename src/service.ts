@@ -102,7 +102,9 @@ export class Service {
 
   /** Hot reload; deferred while any account is mid-refresh. */
   reload(): void {
-    if ([...this.accounts.values()].some((a) => a.busy)) { this.reloadPending = true; return; }
+    // Also defer while an account holds state that exists only in memory: replacing
+    // or dropping that Account object would lose it (possibly the only live RT).
+    if ([...this.accounts.values()].some((a) => a.busy || a.hasMemoryOnlyState)) { this.reloadPending = true; return; }
     this.reloadPending = false;
     const cfg = loadConfig(this.configPath);
     this.cfg = cfg;
