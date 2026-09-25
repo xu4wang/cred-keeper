@@ -80,6 +80,14 @@ export class Account {
    * Vault vs published file (design §4.3). Returns the authoritative cred, or
    * null when neither side is usable (breaker).
    */
+  /** reconcile() under the account lock; 'locked' when another holder is busy. */
+  reconcileLocked(): OauthCred | null | 'locked' {
+    const lockPath = this.p.lock(this.cfg.id);
+    if (!tryAcquire(lockPath)) return 'locked';
+    try { return this.reconcile(); } finally { release(lockPath); }
+  }
+
+  /** Callers must hold the account lock (see reconcileLocked). */
   reconcile(): OauthCred | null {
     const pubText = readFileNoFollow(this.cfg.credentialPath);
     const pub = parseCred(pubText);
@@ -148,15 +156,20 @@ export class Account {
       if (!tryAcquire(lockPath)) return 'locked';
       try { return await this.recoverPending(true); } finally { release(lockPath); }
     }
-    const pendingPath = this.p.pending(this.cfg.id);
-    const text = readFileNoFollow(pendingPath);
-    if (text === null) return 'none';
+    if (this.unsavedPending) {
+      const path = this.persistPending(this.unsavedPending);
+      if (path) this.unsavedPending = null;
+    }
+    const found = this.readPending();
+    if (!found && this.unsavedPending === null) return 'none';
+    const pendingPath = found?.path ?? '(memory only)';
+    const text = found?.text ?? this.unsavedPending!;
     const pending = parseJsonObject(text) as { base?: string; at?: number; raw?: string } | null;
     const body = pending && typeof pending.raw === 'string' ? (parseJsonObject(pending.raw) as TokenResponse | null) : null;
     const vault = this.vault();
     if (vault && body && ((typeof body.access_token === 'string' && body.access_token === vault.accessToken)
         || (typeof body.refresh_token === 'string' && body.refresh_token === vault.refreshToken))) {
-      rmSync(pendingPath, { force: true }); // provably applied: the vault carries this response's token
+      this.removePending(); // provably applied: the vault carries this response's token
       return 'none';
     }
     const merged = vault && body && pending!.base === vault.fingerprint && typeof pending!.at === 'number'
@@ -187,10 +200,11 @@ export class Account {
     const lockPath = this.p.lock(this.cfg.id);
     if (!tryAcquire(lockPath)) return 'locked';
     try {
-      const text = readFileNoFollow(this.p.pending(this.cfg.id));
+      const found = this.readPending();
+      const text = found?.text ?? this.unsavedPending;
       if (text === null) return 'no_pending';
       if (action === 'discard') {
-        rmSync(this.p.pending(this.cfg.id), { force: true });
+        this.removePending();
         this.emit(this.cfg.id, 'pending_discarded', 'warn', {});
         return 'discarded';
       }
@@ -217,9 +231,42 @@ export class Account {
     }
   }
 
+  /** Primary pending location, then an emergency one in a different directory. */
+  private pendingPaths(): string[] {
+    return [this.p.pending(this.cfg.id), join(this.global.dataDir, `pending-emergency-${this.cfg.id}.json`)];
+  }
+
+  /** The first existing pending file, if any. */
+  private readPending(): { path: string; text: string } | null {
+    for (const path of this.pendingPaths()) {
+      let text: string | null;
+      try { text = readFileNoFollow(path); } catch { text = null; } // not a regular file → no pending there
+      if (text !== null) return { path, text };
+    }
+    return null;
+  }
+
+  /** A pending record we could not write anywhere yet: retried every tick. Lost only if the process dies too. */
+  unsavedPending: string | null = null;
+
+  /** Persist a refresh response; primary location, else emergency location. Returns the path or null. */
+  private persistPending(record: string): string | null {
+    for (const path of this.pendingPaths()) {
+      try {
+        ensureDir0700(dirname(path));
+        writeFileAtomic0600(path, record);
+        return path;
+      } catch { /* try the next location */ }
+    }
+    return null;
+  }
+
   /** Best effort: a leftover pending file is resolved later by recoverPending (it is provably applied). */
   private removePending(): void {
-    try { rmSync(this.p.pending(this.cfg.id), { force: true }); } catch { /* resolved on a later tick */ }
+    for (const path of this.pendingPaths()) {
+      try { rmSync(path, { force: true }); } catch { /* resolved on a later tick */ }
+    }
+    this.unsavedPending = null;
   }
 
   /** Enter dead/critical, remembering which vault fingerprint it applies to. */
@@ -325,26 +372,24 @@ export class Account {
       if (!force && !this.isDue(cur)) return 'not_due';
       const left = this.leftMin(cur) ?? 0;
       this.state = 'refreshing';
-      const pendingPath = this.p.pending(this.cfg.id);
       const at = this.now();
       const out = await refreshToken(this.http, this.global.endpoints.token, this.global.clientId, cur.refreshToken);
       if (out.kind === 'ok' || out.kind === 'unparseable_200') {
         // The RT is rotated server-side from here on. Persist the raw response
         // first; if that fails, keep going in memory and retry every tick.
-        let pendingSaved = true;
-        try {
-          ensureDir0700(dirname(pendingPath));
-          writeFileAtomic0600(pendingPath, JSON.stringify({ base: cur.fingerprint, at, raw: out.bodyText }));
-        } catch (e) {
-          pendingSaved = false;
-          this.emit(this.cfg.id, 'persist_failed', 'critical', { stage: 'pending', error: (e as Error).message });
+        const record = JSON.stringify({ base: cur.fingerprint, at, raw: out.bodyText });
+        const savedAt = this.persistPending(record);
+        const pendingSaved = savedAt !== null;
+        if (!pendingSaved) {
+          this.unsavedPending = record; // retried every tick until it lands on disk
+          this.emit(this.cfg.id, 'persist_failed', 'critical', { stage: 'pending' });
         }
         const merged = out.kind === 'ok' ? mergeTokenResponse(cur, out.body, at) : null;
         if (!merged) {
           this.setStuck('critical', cur.fingerprint);
           this.failures++;
           this.emit(this.cfg.id, 'critical_unknown_response', 'critical', {
-            keys: out.kind === 'ok' ? Object.keys(out.body ?? {}).sort() : [], pendingPath: pendingSaved ? pendingPath : null,
+            keys: out.kind === 'ok' ? Object.keys(out.body ?? {}).sort() : [], pendingPath: savedAt,
           });
           return 'critical';
         }

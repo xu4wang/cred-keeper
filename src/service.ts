@@ -121,7 +121,7 @@ export class Service {
     const legacy = this.cfg.legacyLockDir;
     while (legacy && legacyLockLive(legacy)) await new Promise((r) => setTimeout(r, 5000));
     for (const a of this.accounts.values()) {
-      try { await a.recoverPending(); a.reconcile(); } catch (e) {
+      try { if ((await a.recoverPending()) !== 'locked') a.reconcileLocked(); } catch (e) {
         this.emit(a.cfg.id, 'internal_error', 'error', { stage: 'startup', error: (e as Error).message });
       }
     }
@@ -161,8 +161,8 @@ export class Service {
       if (!a.flushUnsaved()) return;
       const rec = await a.recoverPending();
       if (rec === 'unresolved' || rec === 'locked') return;
-      const cur = a.reconcile();
-      if (!cur) return;
+      const cur = a.reconcileLocked();
+      if (!cur || cur === 'locked') return;
       this.rtWarn(a, cur.refreshTokenExpiresAt);
       if (a.state !== 'critical' && a.isDue(cur)) { await a.refresh(); return; }
       await this.pollUsage(a, cur.accessToken);

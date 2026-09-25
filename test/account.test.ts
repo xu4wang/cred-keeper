@@ -177,7 +177,35 @@ test('pending cannot be persisted → the new credential is still applied', asyn
   fake.tokenReplies.push({ status: 200, body: { access_token: 'AT-np', refresh_token: 'RT-np', expires_in: 100 } });
   assert.equal(await a.refresh(), 'refreshed');
   assert.match(readFileSync(credPath, 'utf-8'), /RT-np/);
-  assert.ok(types(svc).includes('persist_failed'));
+  assert.ok(!types(svc).includes('persist_failed'), 'the emergency location took the pending record');
+  assert.equal(existsSync(join(svc.cfg.dataDir, 'pending-emergency-a1.json')), false, 'removed once applied');
+});
+
+test('pending falls back to an emergency location; with nowhere to write it is kept in memory and retried', async () => {
+  const { svc, a, p } = setup();
+  writeFileSync(dirname(p.pending('a1')), 'not a dir'); // primary location unusable
+  const emergency = join(svc.cfg.dataDir, 'pending-emergency-a1.json');
+  mkdirSync(emergency); // emergency location unusable too (a directory is in the way)
+  fake.tokenReplies.push({ status: 200, body: { __raw: '{"access_token":"AT-t","refresh_token":"RT-ONLY' } });
+  assert.equal(await a.refresh(), 'critical');
+  assert.ok(a.unsavedPending?.includes('RT-ONLY'), 'the only copy of the response is kept in memory');
+  rmSync(emergency, { recursive: true });
+  assert.equal(await a.recoverPending(), 'unresolved');
+  assert.equal(a.unsavedPending, null, 'persisted on the next attempt');
+  assert.match(readFileSync(emergency, 'utf-8'), /RT-ONLY/);
+});
+
+test('tick skips reconciliation while another process holds the account lock', async () => {
+  const { svc, credPath, p } = setup();
+  svc.accounts.get('a1')!.reconcile();
+  writeFileSync(credPath, '{}');
+  mkdirSync(dirname(p.lock('a1')), { recursive: true });
+  writeFileSync(p.lock('a1'), JSON.stringify({ pid: process.ppid, start: null }));
+  await svc.tick();
+  assert.equal(readFileSync(credPath, 'utf-8'), '{}', 'no republish without the lock');
+  rmSync(p.lock('a1'));
+  await svc.tick();
+  assert.notEqual(readFileSync(credPath, 'utf-8'), '{}');
 });
 
 test('vault cannot be written → kept in memory, flushed on a later tick', async () => {
