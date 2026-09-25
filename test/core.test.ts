@@ -151,33 +151,27 @@ test('keychain: service naming and an explicit keychain on every lookup', async 
   assert.ok(!args.includes('-w'), 'existence only, never the secret');
 });
 
-test('legacy lock: pid-less dir is stale only after 2 minutes; never taken from a live holder', async () => {
-  const { acquireLegacy, releaseLegacy } = await import('../src/lock.ts');
+test('legacy lock: taken only when absent; never cleaned or taken over by us', async () => {
+  const { acquireLegacy, releaseLegacy, legacyStale } = await import('../src/lock.ts');
   const { statSync } = await import('node:fs');
   const d = tmp();
   const dir = join(d, 'legacy.lock');
-  mkdirSync(dir); // holder crashed between mkdir and pid write
-  const m = statSync(dir).mtimeMs;
-  assert.equal(acquireLegacy(dir, m + 60_000), false, 'fresh pid-less dir: a holder may be mid-acquire');
-  assert.equal(acquireLegacy(dir, m + 180_000), true, 'old pid-less dir is reclaimed');
+  assert.equal(acquireLegacy(dir), true);
   assert.equal(readFileSync(join(dir, 'pid'), 'utf-8').trim(), String(process.pid));
+  assert.equal(acquireLegacy(dir), false, 'held');
   releaseLegacy(dir);
   assert.equal(existsSync(dir), false);
-  mkdirSync(dir);
+  mkdirSync(dir); // holder between mkdir and pid write, or crashed there
+  const m = statSync(dir).mtimeMs;
+  assert.equal(acquireLegacy(dir), false);
+  assert.equal(legacyStale(dir, m + 60_000), false, 'fresh pid-less dir: maybe mid-acquire');
+  assert.equal(legacyStale(dir, m + 180_000), true, 'old pid-less dir is reported stale');
+  writeFileSync(join(dir, 'pid'), '999999');
+  assert.equal(legacyStale(dir), true, 'dead holder is reported stale');
+  assert.equal(acquireLegacy(dir), false, 'but never cleaned or taken over by us');
+  assert.ok(existsSync(join(dir, 'pid')));
   writeFileSync(join(dir, 'pid'), String(process.ppid));
-  assert.equal(acquireLegacy(dir, Date.now() + 10 * 60_000), false, 'live holder keeps it regardless of age');
+  assert.equal(legacyStale(dir), false, 'live holder');
   releaseLegacy(dir);
   assert.equal(readFileSync(join(dir, 'pid'), 'utf-8'), String(process.ppid), "release never removes someone else's lock");
-});
-
-test('legacy lock: a stale dir re-taken by a live holder right before our claim is put back', async () => {
-  const { acquireLegacy } = await import('../src/lock.ts');
-  const d = tmp();
-  const dir = join(d, 'legacy.lock');
-  mkdirSync(dir);
-  writeFileSync(join(dir, 'pid'), '999999'); // dead holder → stale
-  const ok = acquireLegacy(dir, Date.now(), () => writeFileSync(join(dir, 'pid'), String(process.ppid))); // cron re-took it
-  assert.equal(ok, false);
-  assert.equal(existsSync(dir), false, 'never renamed back (that could clobber a freshly created lock)');
-  assert.equal(acquireLegacy(dir), false, 'and we keep off the lock while that holder is alive');
 });

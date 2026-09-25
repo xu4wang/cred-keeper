@@ -81,6 +81,7 @@ export class Service {
       : type === 'usage_high' || type === 'usage_locked' ? `${String(data.window)}|${String(data.resetsAt)}`
       : type === 'heartbeat' ? nowIso(this.now()).slice(0, 10)
       : type === 'republished' ? nowIso(this.now()).slice(0, 13) // at most one alert per hour
+      : type === 'legacy_lock_stale' ? nowIso(this.now()).slice(0, 13)
       : type === 'recovered' || type === 'hook_failed' ? String(id)
       : 'episode';
     this.alerter.offer({ eventId: id, type, level, account, title: title(type, account, data), message: JSON.stringify(data), dedupKey, data });

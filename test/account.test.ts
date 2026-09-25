@@ -354,7 +354,7 @@ test('no alert script → nothing is executed, event still recorded', async () =
 });
 
 test('legacy cron lock: held by a live process → no refresh; otherwise taken with the old protocol and released', async () => {
-  const { a, p } = setup();
+  const { svc, a, p } = setup();
   const legacy = join(tmp(), 'legacy.lock');
   a.cfg.legacyLockDir = legacy;
   mkdirSync(legacy);
@@ -363,7 +363,10 @@ test('legacy cron lock: held by a live process → no refresh; otherwise taken w
   assert.equal(await a.refresh(), 'locked');
   assert.equal(fake.tokenRequests.length, n);
   assert.equal(existsSync(p.lock('a1')), false, 'own lock released too');
-  writeFileSync(join(legacy, 'pid'), '999999'); // dead holder → stale, cleaned like the script does
+  writeFileSync(join(legacy, 'pid'), '999999'); // dead holder → stale: reported, never cleaned by us
+  assert.equal(await a.refresh(), 'locked');
+  assert.ok(types(svc).includes('legacy_lock_stale'));
+  rmSync(legacy, { recursive: true }); // what the legacy script (or a human) does
   let seenPid = '';
   fake.tokenReplies.push({ status: 200, body: { access_token: 'AT-lg', refresh_token: 'RT-lg', expires_in: 100 } });
   const orig = a.http.request.bind(a.http);

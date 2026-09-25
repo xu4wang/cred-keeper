@@ -8,7 +8,7 @@ import { randomBytes } from 'node:crypto';
 import type { AccountConfig, Config, Level } from './config.ts';
 import { paths } from './config.ts';
 import { mergeTokenResponse, parseCred, type OauthCred, type TokenResponse } from './cred.ts';
-import { acquireLegacy, release, releaseLegacy, tryAcquire } from './lock.ts';
+import { acquireLegacy, legacyStale, release, releaseLegacy, tryAcquire } from './lock.ts';
 import { keychainItemExists, keychainServiceFor } from './keychain.ts';
 import { refreshToken, type Http } from './oauth.ts';
 import { runScript, succeeded } from './scripts.ts';
@@ -400,7 +400,15 @@ export class Account {
     const lockPath = this.p.lock(this.cfg.id);
     if (!tryAcquire(lockPath)) return 'locked';
     const legacy = this.cfg.legacyLockDir;
-    if (legacy && !acquireLegacy(legacy)) { release(lockPath); return 'locked'; }
+    if (legacy && !acquireLegacy(legacy)) {
+      release(lockPath);
+      if (legacyStale(legacy)) {
+        this.emit(this.cfg.id, 'legacy_lock_stale', 'error', {
+          dir: legacy, hint: 'a stale legacy cron lock blocks refreshing; if no cron refresh is running, remove it: rm -f <dir>/pid <dir>/alerted && rmdir <dir>',
+        });
+      }
+      return 'locked';
+    }
     this.refreshing = true;
     try {
       if (!this.flushUnsaved(true)) return 'persist_failed';
