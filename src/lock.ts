@@ -6,7 +6,8 @@
  * crashed and the pid number came back).
  */
 import { execFileSync } from 'node:child_process';
-import { constants, closeSync, mkdirSync, openSync, readFileSync, rmdirSync, rmSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { constants, closeSync, mkdirSync, openSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { ensureDir0700, parseJsonObject } from './util.ts';
 
@@ -72,22 +73,30 @@ export function release(path: string): void {
 
 /**
  * Take the legacy cron script's lock with its own protocol: mkdir the dir, then
- * write our pid to `<dir>/pid`. A dir whose recorded pid is dead is stale and
- * cleaned first (same rule as the script). Returns false while a live holder has it.
+ * write our pid to `<dir>/pid`. Returns false while a live holder has it.
+ *
+ * Stale = recorded pid is dead, or no/garbage pid and the dir is older than
+ * 2 minutes (a holder that crashed between mkdir and writing its pid). A stale
+ * dir is first claimed by an atomic rename, then inspected: if what we claimed
+ * turns out to be a live holder's fresh lock (it re-created the dir in the
+ * meantime), it is put back and we back off.
  */
-export function acquireLegacy(dir: string): boolean {
+export function acquireLegacy(dir: string, now = Date.now(), beforeClaim?: () => void): boolean {
   if (legacyLockLive(dir)) return false;
-  let owner = 0;
-  try { owner = Number(readFileSync(`${dir}/pid`, 'utf-8').trim()) || 0; } catch { /* no pid file */ }
-  if (owner && !pidAlive(owner)) {
-    rmSync(`${dir}/pid`, { force: true });
-    rmSync(`${dir}/alerted`, { force: true });
-    try { rmdirSync(dir); } catch { /* gone or not empty */ }
+  if (legacyStale(dir, now)) {
+    const claimed = `${dir}.stale-${process.pid}-${randomBytes(4).toString('hex')}`;
+    beforeClaim?.(); // test seam: the race window between the staleness check and the claim
+    try { renameSync(dir, claimed); } catch { return false; } // someone else moved it: retry next tick
+    if (legacyLockLive(claimed) || !legacyStale(claimed, now)) {
+      try { renameSync(claimed, dir); } catch { /* the holder already re-created it; it keeps its own */ }
+      return false;
+    }
+    rmSync(claimed, { recursive: true, force: true });
   }
   try {
     mkdirSync(dir, { mode: 0o700 });
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === 'EEXIST') return false; // holder mid-acquire (dir before pid)
+    if ((e as NodeJS.ErrnoException).code === 'EEXIST') return false; // a holder between mkdir and pid write
     throw e;
   }
   try {
@@ -97,6 +106,15 @@ export function acquireLegacy(dir: string): boolean {
     throw e;
   }
   return true;
+}
+
+function legacyStale(dir: string, now: number): boolean {
+  let st;
+  try { st = statSync(dir); } catch { return false; } // absent: nothing to clean
+  let pid = 0;
+  try { pid = Number(readFileSync(`${dir}/pid`, 'utf-8').trim()) || 0; } catch { /* no pid file */ }
+  if (Number.isInteger(pid) && pid > 0) return !pidAlive(pid);
+  return now - st.mtimeMs > 120_000;
 }
 
 export function releaseLegacy(dir: string): void {

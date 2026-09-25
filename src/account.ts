@@ -414,9 +414,16 @@ export class Account {
       // Keychain split: claude would read the keychain item, not the file we refresh.
       // Refreshing would rotate the RT under claude's feet (the keychain copy dies).
       const svc = keychainServiceFor(this.cfg.credentialPath);
-      if (this.keychainGate === 'active' && this.keychainProbe(svc) === true) {
-        this.emit(this.cfg.id, 'keychain_split', 'error', { service: svc, hint: `remove it: security delete-generic-password -s "${svc}"` });
-        return 'keychain_split';
+      if (this.keychainGate === 'active') {
+        const has = this.keychainProbe(svc);
+        if (has === true) {
+          this.emit(this.cfg.id, 'keychain_split', 'error', { service: svc, hint: `remove it: security delete-generic-password -s "${svc}"` });
+          return 'keychain_split';
+        }
+        if (has === null) { // an active gate that cannot answer must not wave the refresh through
+          this.emit(this.cfg.id, 'keychain_check_failed', 'error', { service: svc });
+          return 'keychain_check_failed';
+        }
       }
       const left = this.leftMin(cur) ?? 0;
       this.state = 'refreshing';

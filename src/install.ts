@@ -86,9 +86,10 @@ export function installService(configPath: string, logDir: string, load: boolean
     const path = join(dirname(logDir), `${LABEL}.plist`);
     writeFileSync(path, launchdPlist(nodeBin, cliPath, configPath, logDir, user), { mode: 0o644 });
     const target = `/Library/LaunchDaemons/${LABEL}.plist`;
+    const q = (x: string) => `'${x.replace(/'/g, `'\\''`)}'`;
     const next = [
       'run in a terminal (needs sudo):',
-      `  sudo install -o root -g wheel -m 644 ${path} ${target}`,
+      `  sudo install -o root -g wheel -m 644 ${q(path)} ${target}`,
       `  sudo launchctl bootstrap system ${target}`,
       'verify:',
       `  sudo launchctl print system/${LABEL} | head -20`,

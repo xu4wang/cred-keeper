@@ -150,3 +150,33 @@ test('keychain: service naming and an explicit keychain on every lookup', async 
   assert.equal(args.at(-1), join(homedir(), 'Library', 'Keychains', 'login.keychain-db'), 'daemon context: name the login keychain explicitly');
   assert.ok(!args.includes('-w'), 'existence only, never the secret');
 });
+
+test('legacy lock: pid-less dir is stale only after 2 minutes; never taken from a live holder', async () => {
+  const { acquireLegacy, releaseLegacy } = await import('../src/lock.ts');
+  const { statSync } = await import('node:fs');
+  const d = tmp();
+  const dir = join(d, 'legacy.lock');
+  mkdirSync(dir); // holder crashed between mkdir and pid write
+  const m = statSync(dir).mtimeMs;
+  assert.equal(acquireLegacy(dir, m + 60_000), false, 'fresh pid-less dir: a holder may be mid-acquire');
+  assert.equal(acquireLegacy(dir, m + 180_000), true, 'old pid-less dir is reclaimed');
+  assert.equal(readFileSync(join(dir, 'pid'), 'utf-8').trim(), String(process.pid));
+  releaseLegacy(dir);
+  assert.equal(existsSync(dir), false);
+  mkdirSync(dir);
+  writeFileSync(join(dir, 'pid'), String(process.ppid));
+  assert.equal(acquireLegacy(dir, Date.now() + 10 * 60_000), false, 'live holder keeps it regardless of age');
+  releaseLegacy(dir);
+  assert.equal(readFileSync(join(dir, 'pid'), 'utf-8'), String(process.ppid), "release never removes someone else's lock");
+});
+
+test('legacy lock: a stale dir re-taken by a live holder right before our claim is put back', async () => {
+  const { acquireLegacy } = await import('../src/lock.ts');
+  const d = tmp();
+  const dir = join(d, 'legacy.lock');
+  mkdirSync(dir);
+  writeFileSync(join(dir, 'pid'), '999999'); // dead holder → stale
+  const ok = acquireLegacy(dir, Date.now(), () => writeFileSync(join(dir, 'pid'), String(process.ppid))); // cron re-took it
+  assert.equal(ok, false);
+  assert.equal(readFileSync(join(dir, 'pid'), 'utf-8'), String(process.ppid), 'the live holder still has its lock in place');
+});

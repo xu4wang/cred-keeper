@@ -386,6 +386,12 @@ test('keychain split gate: refuses to refresh only when the gate is active and t
   assert.equal(await s.a.refresh(), 'keychain_split');
   assert.equal(fake.tokenRequests.length, n);
   assert.ok(types(s.svc).includes('keychain_split'));
+  const u = setup();
+  u.a.keychainProbe = () => null; // lookup failed after startup
+  u.a.keychainGate = 'active';
+  const m = fake.tokenRequests.length;
+  assert.equal(await u.a.refresh(), 'keychain_check_failed', 'an active gate that cannot answer blocks');
+  assert.equal(fake.tokenRequests.length, m);
   void svc;
 });
 
