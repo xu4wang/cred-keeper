@@ -81,7 +81,7 @@ export class Service {
       : type === 'usage_high' || type === 'usage_locked' ? `${String(data.window)}|${String(data.resetsAt)}`
       : type === 'heartbeat' ? nowIso(this.now()).slice(0, 10)
       : type === 'republished' ? nowIso(this.now()).slice(0, 13) // at most one alert per hour
-      : type === 'legacy_lock_stale' ? nowIso(this.now()).slice(0, 13)
+      : type === 'legacy_lock_stale' || type === 'keychain_gate_unavailable' ? `${level}|${nowIso(this.now()).slice(0, 13)}`
       : type === 'recovered' || type === 'hook_failed' ? String(id)
       : 'episode';
     this.alerter.offer({ eventId: id, type, level, account, title: title(type, account, data), message: JSON.stringify(data), dedupKey, data });
@@ -96,7 +96,6 @@ export class Service {
         next.set(a.id, existing);
       } else {
         const acc = new Account(a, this.cfg, this.http, this.emit, this.now);
-        acc.keychainGate = this.keychainGate ?? 'not-applicable';
         next.set(a.id, acc);
       }
     }
@@ -121,13 +120,18 @@ export class Service {
     this.store.addEvent(null, 'config_reloaded', 'info', { accounts: cfg.accounts.map((a) => a.id) });
   }
 
-  keychainGate: GateState = 'not-applicable';
+  /** Latest gate probe: the service's own startup probe, then each account's on-the-spot probes. */
+  get keychainGate(): GateState {
+    let latest: GateState = this.startupGate;
+    for (const a of this.accounts.values()) if (a.keychainGate !== 'not-applicable') latest = a.keychainGate;
+    return latest;
+  }
+  private startupGate: GateState = 'not-applicable';
 
   async start(): Promise<void> {
     if (!this.cfg.alert) this.store.addEvent(null, 'alerts_disabled', 'info', { reason: 'alert.script not configured' });
-    this.keychainGate = probeKeychainGate();
-    for (const a of this.accounts.values()) a.keychainGate = this.keychainGate;
-    if (this.keychainGate === 'unavailable') {
+    this.startupGate = probeKeychainGate();
+    if (this.startupGate === 'unavailable') {
       this.emit(null, 'keychain_gate_unavailable', 'error', {
         hint: 'the keychain split check cannot see the login keychain from this context; run `cred-keeper keychain-sentinel` in a login session, then restart the service',
       });

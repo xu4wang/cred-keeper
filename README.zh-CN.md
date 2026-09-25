@@ -131,7 +131,17 @@ curl -s 127.0.0.1:<port>/healthz              # keychainGate 应为 "active"
 1. 用该账号对应的服务名创建一个测试条目，例如 `security add-generic-password -s "Claude Code-credentials-<hash>" -a test -w x`
 2. 让该账号进入到期状态，例如临时调大它的 `marginMin`
 3. 确认出现了 `keychain_split` 事件，并且没有发出刷新请求
-4. 删除测试条目，恢复配置
+4. 删除测试条目，恢复配置，然后确认不带后缀的条目仍然不存在：`security find-generic-password -s "Claude Code-credentials" ~/Library/Keychains/login.keychain-db` 必须返回 44
+
+**测试时绝不能创建不带后缀的 `Claude Code-credentials` 条目**（在共享账号正在使用的机器上）：否则所有使用 `~/.claude` 的消费者都会立刻改读 keychain。
+
+闸门在每次刷新前现场探测：先查哨兵，再查分裂条目。所以 login keychain 一旦变得可见，闸门会自动恢复；手动执行 `cred-keeper refresh` 也会经过同一道闸门。`/healthz` 报告的是最近一次的探测结果。
+
+## 从旧 cron 迁移（default 账号）
+
+1. 选一个刚刷新完的闲时窗口，备份 crontab，然后删除其中的刷新行和契约审计行
+2. default 账号配置 `legacyLockDir`，指向旧锁（`~/.botmux/logs/.cred-refresh.lock`）。这样在 cron 可能还会运行的期间，服务和旧脚本是互斥的
+3. `cred-keeper doctor` 确认 cron 行已经删除之后，**从配置里去掉 `legacyLockDir`**。否则，服务如果在刷新过程中被重启，留下的旧锁会永远卡住刷新。这种情况虽然会触发 `legacy_lock_stale`（AT 快过期时升级为 critical），但没有人会去清理它
 
 ## 测试
 

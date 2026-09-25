@@ -69,3 +69,14 @@ test('default hook: unreadable bots.json → refuses to seed', () => {
   assert.equal(r.status, 3);
   assert.equal(readFileSync(join(home, '.botmux/bots/cli_shared/claude/.credentials.json'), 'utf-8'), 'OLD-cli_shared');
 });
+
+test('default hook: finds botmux from the exec line of ~/.botmux/bin/botmux when BOTMUX_CLI is unset', () => {
+  const { home, cli } = fakeHome(`require('fs').appendFileSync(process.env.HOME + '/calls', process.argv.slice(2).join(' ') + '\\n');`);
+  mkdirSync(join(home, '.botmux', 'bin'), { recursive: true });
+  writeFileSync(join(home, '.botmux', 'bin', 'botmux'), `#!/bin/sh\nexec node "${cli}" "$@"\n`);
+  const r = run(home, {});
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(readFileSync(join(home, 'calls'), 'utf-8').trim(), 'suspend all');
+  const { home: bare } = fakeHome('');
+  assert.equal(run(bare, {}).status, 127, 'no wrapper and no BOTMUX_CLI → fails loudly');
+});

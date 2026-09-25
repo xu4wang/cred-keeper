@@ -18,7 +18,7 @@ function setup(expIn = 10 * HOUR, extra: Record<string, unknown> = {}) {
   const credPath = join(d, 'acct', '.credentials.json');
   writeFileSync(credPath, credText('AT-SECRET-1', 'RT-SECRET-1', Date.now() + expIn, { refreshTokenExpiresAt: Date.now() + 3 * 86_400_000 }), { mode: 0o600 });
   const svc = new Service(cfgPath, { alertSleep: async () => {} });
-  for (const a of svc.accounts.values()) a.jitterMs = 0;
+  for (const a of svc.accounts.values()) { a.jitterMs = 0; a.gateProbe = () => 'not-applicable'; }
   return { d, cfgPath, credPath, svc };
 }
 

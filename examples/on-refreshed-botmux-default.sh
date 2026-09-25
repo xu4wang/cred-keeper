@@ -10,13 +10,15 @@
 # NODE defaults to the node running cred-keeper's service (its dir is first on PATH).
 set -u
 NODE="${NODE:-$(command -v node)}"
-BOTMUX_CLI="${BOTMUX_CLI:-$HOME/beta/botmux/dist/cli.js}"   # what ~/.botmux/bin/botmux execs
+# botmux's entry point, taken from the `exec node "<cli.js>" "$@"` line of ~/.botmux/bin/botmux
+# (machine-specific: dev-beta uses ~/beta/botmux, others e.g. ~/austin/botmux). Override with BOTMUX_CLI.
+BOTMUX_CLI="${BOTMUX_CLI:-$(sed -n 's/^exec node "\(.*\)" "\$@"$/\1/p' "$HOME/.botmux/bin/botmux" 2>/dev/null | head -1)}"
 BOTS_JSON="${BOTS_JSON:-$HOME/.botmux/bots.json}"
 SRC="$CK_CREDENTIAL_PATH"
 rc=0
 
 if [ -z "$NODE" ] || [ ! -x "$NODE" ]; then echo "node not found (set NODE)" >&2; exit 127; fi
-if [ ! -f "$BOTMUX_CLI" ]; then echo "botmux cli not found: $BOTMUX_CLI (set BOTMUX_CLI)" >&2; exit 127; fi
+if [ -z "$BOTMUX_CLI" ] || [ ! -f "$BOTMUX_CLI" ]; then echo "botmux cli not found: '$BOTMUX_CLI' (set BOTMUX_CLI)" >&2; exit 127; fi
 
 # appIds whose bot has its own account → excluded from seeding.
 own_account="$("$NODE" -e '

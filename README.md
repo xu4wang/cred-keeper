@@ -125,7 +125,17 @@ To verify the keychain gate positively in the daemon's own context:
 1. Create a dummy item with the account's service name, e.g. `security add-generic-password -s "Claude Code-credentials-<hash>" -a test -w x`
 2. Make the account due, for example by temporarily raising its `marginMin`
 3. Confirm a `keychain_split` event appears and no refresh is sent
-4. Delete the dummy item and restore the config
+4. Delete the dummy item and restore the config, then confirm the unsuffixed item is still absent: `security find-generic-password -s "Claude Code-credentials" ~/Library/Keychains/login.keychain-db` must exit 44
+
+**Never create the unsuffixed `Claude Code-credentials` item for this test** on a machine whose shared account is in use: every consumer of `~/.claude` would switch to reading the keychain.
+
+The gate is probed on the spot before every refresh (the sentinel first, then the split item), so it recovers by itself once the login keychain becomes visible, and a manual `cred-keeper refresh` goes through the same gate. `/healthz` reports the latest probe result.
+
+## Migrating from the legacy cron (default account)
+
+1. Pick a quiet window right after a refresh. Back up the crontab, then delete its refresh and contract-audit lines.
+2. Configure the default account with `legacyLockDir` pointing at the old lock (`~/.botmux/logs/.cred-refresh.lock`). While the cron might still run, the service and the script are then mutually exclusive.
+3. Once `cred-keeper doctor` confirms the cron lines are gone, **remove `legacyLockDir` from the config**. Otherwise a lock left behind by a restart during a refresh would block refreshing forever. That case does raise `legacy_lock_stale`, which escalates to critical when the AT is about to expire, but nothing would clean the lock up.
 
 ## Tests
 

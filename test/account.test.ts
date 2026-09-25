@@ -24,6 +24,7 @@ function setup(opts: { hook?: string; alert?: string; expIn?: number; minLevel?:
   const svc = new Service(cfgPath, { alertSleep: async () => {} });
   const a = svc.accounts.get('a1')!;
   a.jitterMs = 0;
+  a.gateProbe = () => 'not-applicable'; // tests never depend on this machine's keychain
   return { d, svc, a, cfgPath, credPath: accounts[0].credentialPath, p: paths(svc.cfg) };
 }
 const types = (svc: Service) => svc.store.events({ limit: 100 }).map((e) => e.type).reverse();
@@ -365,7 +366,10 @@ test('legacy cron lock: held by a live process → no refresh; otherwise taken w
   assert.equal(existsSync(p.lock('a1')), false, 'own lock released too');
   writeFileSync(join(legacy, 'pid'), '999999'); // dead holder → stale: reported, never cleaned by us
   assert.equal(await a.refresh(), 'locked');
-  assert.ok(types(svc).includes('legacy_lock_stale'));
+  assert.equal(svc.store.events({ type: 'legacy_lock_stale', limit: 1 })[0].level, 'error');
+  a.cfg.redMin = 120; // the AT (1h left) is now inside the red zone
+  assert.equal(await a.refresh(), 'locked');
+  assert.equal(svc.store.events({ type: 'legacy_lock_stale', limit: 1 })[0].level, 'critical', 'escalates when the AT is about to expire');
   rmSync(legacy, { recursive: true }); // what the legacy script (or a human) does
   let seenPid = '';
   fake.tokenReplies.push({ status: 200, body: { access_token: 'AT-lg', refresh_token: 'RT-lg', expires_in: 100 } });
@@ -379,19 +383,24 @@ test('legacy cron lock: held by a live process → no refresh; otherwise taken w
 test('keychain split gate: refuses to refresh only when the gate is active and the item exists', async () => {
   const { svc, a } = setup();
   a.keychainProbe = () => true;
-  a.keychainGate = 'unavailable';
+  a.gateProbe = () => 'unavailable';
   fake.tokenReplies.push({ status: 200, body: { access_token: 'AT-k1', expires_in: 28800 } });
   assert.equal(await a.refresh(), 'refreshed', 'an unavailable gate does not pretend to check');
+  assert.ok(types(svc).includes('keychain_gate_unavailable'), '…but says so');
+  // probed on the spot: the gate recovers as soon as the sentinel becomes visible
+  a.gateProbe = () => 'active';
+  a.cfg.marginMin = 100_000; // due again
+  assert.equal(await a.refresh(), 'keychain_split');
   const s = setup();
   s.a.keychainProbe = () => true;
-  s.a.keychainGate = 'active';
+  s.a.gateProbe = () => 'active';
   const n = fake.tokenRequests.length;
   assert.equal(await s.a.refresh(), 'keychain_split');
   assert.equal(fake.tokenRequests.length, n);
   assert.ok(types(s.svc).includes('keychain_split'));
   const u = setup();
-  u.a.keychainProbe = () => null; // lookup failed after startup
-  u.a.keychainGate = 'active';
+  u.a.keychainProbe = () => null; // lookup failed after the sentinel answered
+  u.a.gateProbe = () => 'active';
   const m = fake.tokenRequests.length;
   assert.equal(await u.a.refresh(), 'keychain_check_failed', 'an active gate that cannot answer blocks');
   assert.equal(fake.tokenRequests.length, m);

@@ -9,7 +9,7 @@ import type { AccountConfig, Config, Level } from './config.ts';
 import { paths } from './config.ts';
 import { mergeTokenResponse, parseCred, type OauthCred, type TokenResponse } from './cred.ts';
 import { acquireLegacy, legacyStale, release, releaseLegacy, tryAcquire } from './lock.ts';
-import { keychainItemExists, keychainServiceFor } from './keychain.ts';
+import { keychainItemExists, keychainServiceFor, probeKeychainGate, type GateState } from './keychain.ts';
 import { refreshToken, type Http } from './oauth.ts';
 import { runScript, succeeded } from './scripts.ts';
 import { ensureDir0700, fingerprint, nowIso, parseJsonObject, readFileNoFollow, writeFileAtomic0600 } from './util.ts';
@@ -304,9 +304,11 @@ export class Account {
 
   private pendingReported = new Set<string>();
   /** Set by the service after its startup probe; only 'active' makes the split check meaningful. */
-  keychainGate: import('./keychain.ts').GateState = 'unavailable';
-  /** Injectable for tests; production uses the real `security` lookup. */
+  /** Result of the most recent on-the-spot gate probe (reported in /healthz). */
+  keychainGate: GateState = 'not-applicable';
+  /** Injectable for tests; production uses the real `security` lookups. */
   keychainProbe: (service: string) => boolean | null = keychainItemExists;
+  gateProbe: () => GateState = probeKeychainGate;
   /** Outcome of the previous refresh request (to annotate an invalid_grant that follows a network failure). */
   private lastOutcome: string | null = null;
   /** base/vault pair observed under the lock by the last `base_mismatch`. */
@@ -403,7 +405,11 @@ export class Account {
     if (legacy && !acquireLegacy(legacy)) {
       release(lockPath);
       if (legacyStale(legacy)) {
-        this.emit(this.cfg.id, 'legacy_lock_stale', 'error', {
+        const v = this.vault() ?? (() => { try { const r = parseCred(readFileNoFollow(this.cfg.credentialPath)); return r.ok ? r.cred : null; } catch { return null; } })();
+        const left = v ? Math.round((v.expiresAt - this.now()) / 60_000) : null;
+        const urgent = left !== null && left < this.cfg.redMin;
+        this.emit(this.cfg.id, 'legacy_lock_stale', urgent ? 'critical' : 'error', {
+          leftMin: left,
           dir: legacy, hint: 'a stale legacy cron lock blocks refreshing; if no cron refresh is running, remove it: rm -f <dir>/pid <dir>/alerted && rmdir <dir>',
         });
       }
@@ -422,6 +428,15 @@ export class Account {
       // Keychain split: claude would read the keychain item, not the file we refresh.
       // Refreshing would rotate the RT under claude's feet (the keychain copy dies).
       const svc = keychainServiceFor(this.cfg.credentialPath);
+      // Probed on the spot every time: at boot the login keychain may be locked or
+      // invisible, and become visible later. The split answer is trusted only when
+      // the sentinel is visible in this very attempt.
+      this.keychainGate = this.gateProbe();
+      if (this.keychainGate === 'unavailable') {
+        this.emit(this.cfg.id, 'keychain_gate_unavailable', 'error', {
+          hint: 'the split check cannot see the login keychain right now; run `cred-keeper keychain-sentinel` from a login session if this persists',
+        });
+      }
       if (this.keychainGate === 'active') {
         const has = this.keychainProbe(svc);
         if (has === true) {
