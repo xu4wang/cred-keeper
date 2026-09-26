@@ -11,9 +11,9 @@
 # NODE defaults to the node running cred-keeper's service (its dir is first on PATH).
 set -u
 NODE="${NODE:-$(command -v node)}"
-# botmux's entry point, taken from the `exec node "<cli.js>" "$@"` line of ~/.botmux/bin/botmux
-# (machine-specific: dev-beta uses ~/beta/botmux, others e.g. ~/austin/botmux). Override with BOTMUX_CLI.
-BOTMUX_CLI="${BOTMUX_CLI:-$(tr -d '\r' < "$HOME/.botmux/bin/botmux" 2>/dev/null | sed -n -E 's/^[[:space:]]*exec[[:space:]]+[^[:space:]]*node[[:space:]]+("([^"]+)"|'"'"'([^'"'"']+)'"'"'|([^[:space:]"'"'"']+)).*/\2\3\4/p' | head -1)}"
+# botmux's entry point: the `…/cli.js` path in ~/.botmux/bin/botmux (quoted or not — the wrapper's
+# format changes between botmux versions). Machine-specific; override with BOTMUX_CLI.
+BOTMUX_CLI="${BOTMUX_CLI:-$(grep -oE '"[^"]*/cli\.js"|'"'"'[^'"'"']*/cli\.js'"'"'|[^[:space:]"'"'"']+/cli\.js' "$HOME/.botmux/bin/botmux" 2>/dev/null | head -1 | tr -d "\"'")}"
 BOTS_JSON="${BOTS_JSON:-$HOME/.botmux/bots.json}"
 SRC="$CK_CREDENTIAL_PATH"
 rc=0
