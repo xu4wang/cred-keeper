@@ -1,0 +1,396 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>一机多账号 · 动画讲解</title>
+<style>
+:root{
+  --bg:#0c111c; --panel:#161e30; --panel2:#1d2740; --line:#2a3656;
+  --text:#e8ecf5; --muted:#8e9ab5; --orange:#e8845c; --blue:#4a8fe7;
+  --green:#3fb68b; --red:#e5534b; --yellow:#e3b341; --purple:#a57be8;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{background:var(--bg);color:var(--text);font-family:-apple-system,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;overflow-x:hidden}
+#wrap{width:100%;display:flex;flex-direction:column;align-items:center;padding:12px 16px 20px}
+#viewport{position:relative;overflow:hidden;border-radius:14px;box-shadow:0 10px 40px rgba(0,0,0,.5)}
+#stage{position:absolute;left:0;top:0;width:1280px;height:720px;transform-origin:0 0;
+  background:radial-gradient(1200px 600px at 20% 0%,#16213a 0%,var(--bg) 60%);overflow:hidden}
+.scene{position:absolute;inset:0;display:none}
+.scene.active{display:block}
+.a{position:absolute;opacity:0;will-change:opacity,transform}
+.h1{font-size:64px;font-weight:800;letter-spacing:1px}
+.h2{font-size:38px;font-weight:700}
+.sub{font-size:24px;color:var(--muted)}
+.tag{display:inline-block;padding:6px 14px;border-radius:999px;font-size:18px;font-weight:600;border:1px solid var(--line);background:var(--panel)}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px 20px}
+.bot{width:270px;height:58px;display:flex;align-items:center;gap:12px;font-size:21px;font-weight:600}
+.bot .ico{width:34px;height:34px;border-radius:9px;background:var(--panel2);display:grid;place-items:center;font-size:20px}
+.badge{margin-left:auto;font-size:15px;padding:3px 9px;border-radius:6px;font-weight:700}
+.bar{height:14px;border-radius:7px;background:#253050;overflow:hidden}
+.bar i{display:block;height:100%;width:0;border-radius:7px}
+.acct{width:300px}
+.acct .nm{font-size:24px;font-weight:700;display:flex;align-items:center;gap:10px}
+.dot{width:12px;height:12px;border-radius:50%;display:inline-block}
+.small{font-size:16px;color:var(--muted)}
+.mono{font-family:"SF Mono",Menlo,Consolas,monospace}
+.code{font-size:19px;line-height:1.7;white-space:pre}
+.hl{background:rgba(232,132,92,.18);border-radius:4px;padding:1px 4px;color:#ffb38f}
+#cap{position:absolute;left:50%;bottom:26px;transform:translateX(-50%);max-width:1100px;text-align:center;
+  font-size:26px;font-weight:600;padding:10px 26px;border-radius:12px;background:rgba(6,9,16,.78);border:1px solid #243052}
+svg{position:absolute;left:0;top:0;overflow:visible}
+.row{display:flex;align-items:center;gap:14px}
+.note{font-size:20px;line-height:1.5}
+.chip{display:inline-block;font-size:17px;padding:5px 12px;border-radius:8px;background:var(--panel2);border:1px solid var(--line);margin:0 6px 8px 0}
+/* controls */
+#ctl{display:flex;align-items:center;gap:10px;margin-top:12px;flex-wrap:wrap;justify-content:center;max-width:1280px;width:100%}
+#ctl button{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:7px 14px;font-size:14px;cursor:pointer}
+#ctl button:hover{border-color:var(--orange)}
+#prog{flex:1;min-width:160px;height:8px;border-radius:4px;background:#1f2940;cursor:pointer;position:relative}
+#prog i{position:absolute;left:0;top:0;height:100%;background:var(--orange);border-radius:4px}
+#chips{display:flex;gap:6px;flex-wrap:wrap;justify-content:center;margin-top:10px;max-width:1280px}
+#chips span{font-size:13px;padding:4px 10px;border-radius:999px;border:1px solid var(--line);color:var(--muted);cursor:pointer}
+#chips span.on{color:var(--text);border-color:var(--orange);background:rgba(232,132,92,.12)}
+#time{font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums;min-width:84px;text-align:right}
+#gate{position:absolute;inset:0;display:grid;place-items:center;background:rgba(6,9,16,.55);z-index:5}
+#gate button{font-size:34px;font-weight:800;color:#fff;background:var(--orange);border:0;border-radius:18px;padding:22px 44px;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:6px;box-shadow:0 10px 40px rgba(232,132,92,.4)}
+#gate small{font-size:17px;font-weight:500;opacity:.9}
+#bDl{color:var(--text);text-decoration:none;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:7px 14px;font-size:14px}
+body.frames #ctl,body.frames #chips,body.frames #gate{display:none}
+body.frames #wrap{padding:0}
+body.frames #viewport{border-radius:0;box-shadow:none}
+</style>
+<script src="timing.js"></script>
+</head>
+<body>
+<div id="wrap">
+<div id="viewport"><div id="stage">
+
+<!-- ===== S1 标题 ===== -->
+<section class="scene" data-dur="6" data-name="开场">
+  <div class="a" data-at="0.2" style="left:0;right:0;top:200px;text-align:center"><span class="tag" style="color:var(--orange)">cred-keeper × botmux PR #1575</span></div>
+  <div class="a h1" data-at="0.6" style="left:0;right:0;top:260px;text-align:center">一台机器，多个 Claude 账号</div>
+  <div class="a sub" data-at="1.4" style="left:0;right:0;top:360px;text-align:center">m 个订阅账号，分给 n 个机器人用</div>
+</section>
+
+<!-- ===== S2 问题 ===== -->
+<section class="scene" data-dur="11" data-name="问题">
+  <div class="a h2" data-at="0" style="left:80px;top:40px">以前：所有 bot 挤一个账号</div>
+  <svg width="1280" height="720" id="s2svg"></svg>
+  <div class="a card acct" data-at="0.4" style="left:110px;top:250px">
+    <div class="nm"><span class="dot" style="background:var(--blue)"></span>default <span class="small" style="margin-left:auto">Max 20x</span></div>
+    <div class="small" style="margin:14px 0 6px">5 小时用量 <b id="s2pct" style="float:right;color:var(--text)">0%</b></div>
+    <div class="bar"><i id="s2bar"></i></div>
+    <div id="s2warn" class="small" style="margin-top:12px;color:var(--red);opacity:0">⚠ 窗口打满</div>
+  </div>
+  <div id="s2bots"></div>
+</section>
+
+<!-- ===== S3 思路 ===== -->
+<section class="scene" data-dur="10" data-name="思路">
+  <div class="a h2" data-at="0" style="left:80px;top:40px">现在：m 个账号 → n 个 bot</div>
+  <svg width="1280" height="720" id="s3svg"></svg>
+  <div id="s3accts"></div>
+  <div id="s3bots"></div>
+  <div class="a" data-at="5.2" style="left:250px;top:596px;width:380px;text-align:right">
+    <span class="tag" style="border-color:var(--green);color:var(--green)">cred-keeper：让凭证一直有效</span>
+  </div>
+  <div class="a" data-at="6.2" style="left:650px;top:596px;width:380px;text-align:left">
+    <span class="tag" style="border-color:var(--orange);color:var(--orange)">botmux：每个 bot 选一个账号</span>
+  </div>
+</section>
+
+<!-- ===== S4 cred-keeper 刷新 ===== -->
+<section class="scene" data-dur="14" data-name="保鲜凭证">
+  <div class="a h2" data-at="0" style="left:80px;top:40px"><span style="color:var(--green)">cred-keeper</span>：替所有账号刷新凭证</div>
+  <div class="a card" data-at="0.5" style="left:80px;top:130px;width:560px">
+    <div class="row" style="font-size:22px;font-weight:700;margin-bottom:6px">🛡️ 本机常驻服务 <span class="small" style="margin-left:auto">LaunchDaemon · 127.0.0.1</span></div>
+    <div id="s4rows"></div>
+  </div>
+  <div class="a card note" data-at="4" style="left:690px;top:130px;width:510px;border-color:var(--red)">
+    <b style="color:var(--red)">⚠ 必须比 CLI 先刷新</b><br>
+    <span class="small" style="font-size:18px">如果 CLI 在它那份副本里先刷新，refresh token 会被轮换掉，来源目录里的 token 就作废了。</span>
+  </div>
+  <div class="a" data-at="7" style="left:690px;top:300px;width:510px">
+    <div class="small" style="margin-bottom:10px;font-size:18px">每次刷新之后：</div>
+    <div class="row" style="flex-wrap:wrap;gap:10px">
+      <span class="a chip" data-at="7.5" style="position:relative">↻ 写入新凭证</span><span class="a" data-at="8" style="position:relative;color:var(--muted)">→</span>
+      <span class="a chip" data-at="8.3" style="position:relative">运行该账号配置的脚本</span><span class="a" data-at="8.8" style="position:relative;color:var(--muted)">→</span>
+      <span class="a chip" data-at="9.1" style="position:relative;border-color:var(--orange)">botmux suspend 对应 bot</span><span class="a" data-at="9.6" style="position:relative;color:var(--muted)">→</span>
+      <span class="a chip" data-at="9.9" style="position:relative;border-color:var(--green)">下次冷启动拿到新凭证</span>
+    </div>
+  </div>
+  <div class="a card note" data-at="11" style="left:690px;top:470px;width:510px">
+    <span class="small" style="font-size:18px">通过脚本接入，所以 botmux 之外的其他 agent 框架也能用。</span>
+  </div>
+</section>
+
+<!-- ===== S5 监控 ===== -->
+<section class="scene" data-dur="11" data-name="用量监控">
+  <div class="a h2" data-at="0" style="left:80px;top:40px">顺便：盯住每个账号的用量</div>
+  <div class="a card" data-at="0.5" style="left:80px;top:125px;width:760px;padding:18px 24px">
+    <div class="row small" style="margin-bottom:12px"><span style="width:150px">账号</span><span style="width:260px">5h 用量</span><span style="width:260px">7d 用量</span></div>
+    <div id="s5rows"></div>
+    <svg id="s5spark" width="720" height="130" style="position:relative;display:block;margin-top:14px"></svg>
+    <div class="small" style="margin-top:4px">5 小时窗口（锯齿 = 每 5 小时重置）</div>
+  </div>
+  <div class="a card" data-at="4" style="left:880px;top:125px;width:320px">
+    <div style="font-weight:700;font-size:20px;margin-bottom:10px">需要手工 /login</div>
+    <div class="note" style="font-size:17px">🔴 09/30 carol <span class="small">剩 2.4 天</span></div>
+    <div class="note" style="font-size:17px">🟢 10/15 alice <span class="small">剩 18 天</span></div>
+    <div class="note" style="font-size:17px">🟢 10/23 bob <span class="small">剩 26 天</span></div>
+    <div class="small" style="margin-top:8px">RT 到期前提前提醒</div>
+  </div>
+  <div class="a card" data-at="6.5" style="left:880px;top:360px;width:320px">
+    <div style="font-weight:700;font-size:20px;margin-bottom:10px">只读 REST 接口</div>
+    <span class="chip mono">GET /healthz</span><span class="chip mono">GET /v1/events</span><span class="chip mono">用量 · 到期</span>
+  </div>
+</section>
+
+<!-- ===== S6 botmux 配置 ===== -->
+<section class="scene" data-dur="14" data-name="bot 选账号">
+  <div class="a h2" data-at="0" style="left:80px;top:40px"><span style="color:var(--orange)">botmux</span>：一个字段指定账号</div>
+  <div class="a card" data-at="0.5" style="left:80px;top:120px;width:540px">
+    <div class="small" style="margin-bottom:6px">bots.json</div>
+<div class="code mono">{
+  "name": "bot3",
+  "sandbox": true,
+  <span class="hl">"credentialsSourceDir": "~/accounts/acct-b"</span>
+}</div>
+    <div class="small" style="margin-top:8px;font-size:15px">或在飞书里：<span class="mono" style="color:var(--text)">/config set credentialsSourceDir &lt;dir&gt;</span></div>
+  </div>
+  <div class="a card" data-at="2.5" style="left:80px;top:430px;width:540px">
+    <div class="code mono" style="font-size:18px">~/accounts/acct-b/
+└─ claude/
+   ├─ .credentials.json   <span class="small">OAuth 凭证</span>
+   └─ .claude.json        <span class="small">账号信息</span></div>
+  </div>
+  <div class="a card" data-at="4.5" style="left:840px;top:400px;width:360px;border-color:var(--orange)">
+    <div style="font-weight:700;font-size:20px">🤖 bot3 的沙盒</div>
+    <div class="mono small" style="margin-top:6px">&lt;BOT_HOME&gt;/claude/</div>
+    <div id="s6got" class="small" style="margin-top:8px;color:var(--green);opacity:0">✓ 已拿到 acct-b 的凭证（0600）</div>
+  </div>
+  <div id="s6file" class="a" data-at="5" style="left:600px;top:450px;font-size:40px">📄</div>
+  <div class="a small" data-at="5" style="left:625px;top:530px;width:210px;text-align:center;font-size:17px">每次冷启动复制</div>
+  <div class="a card note" data-at="8.5" style="left:640px;top:130px;width:560px;font-size:18px">
+    • 读文件用 <span class="mono">O_NOFOLLOW</span>，写入走临时文件 + rename 原子替换<br>
+    • 同时对齐 <span class="mono">.claude.json</span> 里的账号，删掉 <span class="mono">primaryApiKey</span><br>
+    • 同一个 bot 的多个会话，用文件锁串行执行
+  </div>
+  <div class="a" data-at="11" style="left:640px;top:318px;width:560px"><span class="tag" style="color:var(--muted)">不配置这个字段 = 行为跟现在完全一样</span></div>
+</section>
+
+<!-- ===== S7 fail-closed ===== -->
+<section class="scene" data-dur="12" data-name="fail-closed">
+  <div class="a h2" data-at="0" style="left:80px;top:40px">原则：<span style="color:var(--red)">fail-closed</span>，宁可不启动</div>
+  <div id="s7rows"></div>
+  <div class="a" data-at="8.8" style="left:0;right:0;top:560px;text-align:center;font-size:30px;font-weight:800">
+    配成账号 B 的 bot，<span style="color:var(--orange)">绝不会</span>悄悄跑在共享账号上
+  </div>
+</section>
+
+<!-- ===== S8 结尾 ===== -->
+<section class="scene" data-dur="8" data-name="总结">
+  <div class="a h2" data-at="0" style="left:0;right:0;top:120px;text-align:center">两件事，一个目标：<span style="color:var(--orange)">分摊用量</span></div>
+  <div class="a card" data-at="0.8" style="left:170px;top:230px;width:440px;height:230px;border-color:var(--green)">
+    <div style="font-size:26px;font-weight:800;color:var(--green)">cred-keeper</div>
+    <div class="note" style="margin-top:10px">多个账号的凭证自动续期<br>5h / 7d 用量监控 + RT 到期提醒<br>刷新后运行脚本通知 botmux</div>
+  </div>
+  <div class="a card" data-at="1.6" style="left:670px;top:230px;width:440px;height:230px;border-color:var(--orange)">
+    <div style="font-size:26px;font-weight:800;color:var(--orange)">botmux PR #1575</div>
+    <div class="note" style="margin-top:10px"><span class="mono" style="font-size:18px">credentialsSourceDir</span><br>每个沙盒 bot 指定一个账号<br>出问题就拒绝启动，不回退</div>
+  </div>
+  <div class="a mono small" data-at="3" style="left:0;right:0;top:500px;text-align:center;font-size:19px;line-height:1.8">
+    github.com/xu4wang/cred-keeper<br>github.com/deepcoldy/botmux/pull/1575
+  </div>
+</section>
+
+<div id="cap"></div>
+<div id="gate"><button>▶ 点击播放<small>有配音和背景音乐</small></button></div>
+</div></div>
+
+<div id="ctl">
+  <button id="bPlay">▶ 播放</button>
+  <button id="bRe">↺ 重播</button>
+  <button id="bMute">🔊 声音开</button>
+  <a id="bDl" href="cred-keeper-explainer.mp4" download>⬇ 下载 mp4</a>
+  <div id="prog"><i></i></div>
+  <span id="time">0:00 / 0:00</span>
+</div>
+<div id="chips"></div>
+<audio id="au" src="track.m4a" preload="auto"></audio>
+</div>
+
+<script>
+const $=s=>document.querySelector(s);
+const clamp=(x,a=0,b=1)=>Math.max(a,Math.min(b,x));
+const ease=p=>1-Math.pow(1-p,3);
+const C={orange:'#e8845c',blue:'#4a8fe7',green:'#3fb68b',red:'#e5534b',yellow:'#e3b341',purple:'#a57be8',muted:'#8e9ab5',line:'#2a3656'};
+
+/* ---------- captions per scene ---------- */
+const CAPS=TIMING.caps, SC=TIMING.scenes;
+function warp(si,r){const k=SC[si].knots;for(let i=1;i<k.length;i++){if(r<=k[i][0]||i===k.length-1){const [r0,o0]=k[i-1],[r1,o1]=k[i];return o0+(Math.min(r,r1)-r0)*(o1-o0)/Math.max(1e-9,r1-r0)}}return r}
+
+/* ---------- build dynamic DOM ---------- */
+const BOTY=[120,200,280,360,440,520];
+function botHTML(i,y,id){return `<div class="a card bot" data-at="${0.8+i*0.18}" style="left:890px;top:${y}px;padding:0 14px" id="${id}"><span class="ico">🤖</span>bot${i+1}<span class="badge"></span></div>`}
+$('#s2bots').innerHTML=BOTY.map((y,i)=>botHTML(i,y,'s2b'+i)).join('');
+$('#s3bots').innerHTML=BOTY.map((y,i)=>botHTML(i,y,'s3b'+i)).join('');
+const ACCTS=[{n:'alice',c:C.blue,y:150,bots:[0,1]},{n:'bob',c:C.orange,y:300,bots:[2,3]},{n:'carol',c:C.purple,y:450,bots:[4,5]}];
+$('#s3accts').innerHTML=ACCTS.map((a,i)=>`<div class="a card acct" data-at="${0.4+i*0.3}" style="left:110px;top:${a.y}px;height:100px"><div class="nm"><span class="dot" style="background:${a.c}"></span>${a.n}</div><div class="small" style="margin-top:10px">订阅账号 ${i+1}</div></div>`).join('');
+
+function svgLines(svg,list){
+  svg.innerHTML=list.map((l,i)=>{
+    const d=`M${l.x1},${l.y1} C${(l.x1+l.x2)/2},${l.y1} ${(l.x1+l.x2)/2},${l.y2} ${l.x2},${l.y2}`;
+    return `<path d="${d}" pathLength="1" fill="none" stroke="${l.c}" stroke-width="3" stroke-opacity=".55" class="ln" data-i="${i}"/>
+            <path d="${d}" pathLength="1" fill="none" stroke="${l.c}" stroke-width="5" stroke-linecap="round" class="fl" data-i="${i}" stroke-dasharray="0.015 0.07"/>`;
+  }).join('');
+}
+svgLines($('#s2svg'),BOTY.map(y=>({x1:410,y1:320,x2:890,y2:y+29,c:C.blue})));
+const s3l=[];ACCTS.forEach(a=>a.bots.forEach(b=>s3l.push({x1:410,y1:a.y+50,x2:890,y2:BOTY[b]+29,c:a.c})));
+svgLines($('#s3svg'),s3l);
+
+$('#s4rows').innerHTML=ACCTS.map((a,i)=>`<div style="margin-top:18px">
+  <div class="row" style="font-size:19px"><span class="dot" style="background:${a.c}"></span><b>${a.n}</b>
+  <span class="small" style="margin-left:auto" id="s4t${i}">access token</span></div>
+  <div class="bar" style="margin-top:8px;height:16px"><i id="s4b${i}" style="background:${C.green}"></i></div></div>`).join('');
+
+const USE=[{n:'alice',c:C.blue,h:19,d:56},{n:'bob',c:C.orange,h:7,d:15},{n:'carol',c:C.purple,h:14,d:64}];
+$('#s5rows').innerHTML=USE.map((u,i)=>`<div class="row" style="margin-bottom:12px;font-size:19px">
+  <span style="width:150px" class="row"><span class="dot" style="background:${u.c}"></span><b>${u.n}</b></span>
+  <span style="width:260px" class="row"><span class="bar" style="width:170px"><i id="s5h${i}" style="background:${u.c}"></i></span><span id="s5hv${i}" class="small">0%</span></span>
+  <span style="width:260px" class="row"><span class="bar" style="width:170px"><i id="s5d${i}" style="background:${u.c}"></i></span><span id="s5dv${i}" class="small">0%</span></span></div>`).join('');
+(function(){ // sawtooth sparkline
+  const svg=$('#s5spark');let out='';
+  USE.forEach((u,k)=>{let pts=[];const amp=[0.9,0.35,0.6][k];
+    for(let x=0;x<=720;x+=4){const ph=(x%180)/180;const on=ph<0.55;const v=on?ph/0.55*amp:0;pts.push(`${x},${120-v*110}`)}
+    out+=`<polyline points="${pts.join(' ')}" fill="none" stroke="${u.c}" stroke-width="2.5" pathLength="1" stroke-dasharray="1" class="sp"/>`});
+  svg.innerHTML=`<line x1="0" y1="120" x2="720" y2="120" stroke="${C.line}"/>`+out;
+})();
+
+const FAIL=[
+  ['来源凭证文件缺失、是符号链接，或者不是 OAuth 凭证','⛔ 拒绝启动',C.red],
+  ['环境变量或任意一层 settings 里还有 ANTHROPIC_API_KEY / apiKeyHelper 等覆盖','⛔ 拒绝启动',C.red],
+  ['和 codexAuthSync: "isolated" 同时配置','⛔ 拒绝启动',C.red],
+  ['复用的 tmux pane 当初是用别的账号启动的','↻ 杀掉重开',C.yellow],
+];
+$('#s7rows').innerHTML=FAIL.map((f,i)=>`<div class="a card row" data-at="${0.8+i*1.8}" style="left:110px;top:${140+i*96}px;width:1060px;height:78px">
+  <span style="font-size:21px">${f[0]}</span>
+  <span class="a" data-at="${1.6+i*1.8}" style="position:relative;margin-left:auto;font-weight:800;font-size:21px;color:${f[2]};white-space:nowrap">${f[1]}</span></div>`).join('');
+
+/* ---------- timeline ---------- */
+const scenes=[...document.querySelectorAll('.scene')];
+let starts=[],T=0;scenes.forEach((s,i)=>{starts.push(T);T+=SC[i].dur});
+const TOTAL=T;
+const chips=$('#chips');
+chips.innerHTML=scenes.map((s,i)=>`<span data-i="${i}">${i+1}. ${s.dataset.name}</span>`).join('');
+
+function sceneAt(t){for(let i=scenes.length-1;i>=0;i--)if(t>=starts[i])return i;return 0}
+
+const custom=[
+  null,
+  // S2
+  (lt)=>{
+    const p=clamp((lt-2.4)/4.6), pct=Math.round(ease(p)*100);
+    const bar=$('#s2bar');bar.style.width=pct+'%';bar.style.background=pct>85?C.red:pct>60?C.yellow:C.blue;
+    $('#s2pct').textContent=pct+'%';$('#s2warn').style.opacity=pct>=100?1:0;
+    const limited=lt>=7.4;
+    document.querySelectorAll('#s2svg .ln').forEach((el,i)=>{const d=clamp((lt-1-i*0.15)/0.8);el.style.strokeDasharray=limited?'0.02 0.02':'1';el.style.strokeDashoffset=limited?0:1-d;el.setAttribute('stroke',limited?C.red:C.blue)});
+    document.querySelectorAll('#s2svg .fl').forEach(el=>{el.style.opacity=(lt>1.8&&!limited)?1:0;el.style.strokeDashoffset=-lt*0.35*(1+pct/60)});
+    BOTY.forEach((_,i)=>{const b=document.querySelector(`#s2b${i} .badge`);const on=lt>=7.4+i*0.12;
+      b.textContent=on?'429 限流':'';b.style.background=on?'rgba(229,83,75,.18)':'';b.style.color=C.red;
+      $('#s2b'+i).style.borderColor=on?C.red:''});
+  },
+  // S3
+  (lt)=>{
+    document.querySelectorAll('#s3svg .ln').forEach((el,i)=>{const d=clamp((lt-1.6-i*0.22)/0.7);el.style.strokeDasharray='1';el.style.strokeDashoffset=1-d});
+    document.querySelectorAll('#s3svg .fl').forEach((el,i)=>{el.style.opacity=lt>3.2?1:0;el.style.strokeDashoffset=-lt*0.3});
+    s3l.forEach((l,i)=>{const b=document.querySelector(`#s3b${i} .badge`);const on=lt>=1.9+i*0.22;
+      b.textContent=on?['alice','alice','bob','bob','carol','carol'][i]:'';b.style.color=l.c;b.style.background=on?'rgba(255,255,255,.05)':''});
+  },
+  // S4
+  (lt)=>{
+    ACCTS.forEach((a,i)=>{
+      const period=3.4,ph=(lt+i*1.1)/period, f=ph-Math.floor(ph);
+      const lvl=lt<0.8?1:1-f*0.85;const fresh=f<0.14&&lt>1.5;
+      const b=$('#s4b'+i);b.style.width=(lvl*100)+'%';b.style.background=fresh?C.green:lvl<0.35?C.yellow:C.green;
+      b.style.boxShadow=fresh?'0 0 14px '+C.green:'none';
+      const mins=Math.round(lvl*480);
+      $('#s4t'+i).innerHTML=fresh?'<b style="color:#3fb68b">↻ 已刷新</b>':`剩 ${Math.floor(mins/60)}h${String(mins%60).padStart(2,'0')}m`;
+    });
+  },
+  // S5
+  (lt)=>{
+    USE.forEach((u,i)=>{const p=ease(clamp((lt-1-i*0.25)/1.4));
+      $('#s5h'+i).style.width=u.h*p+'%';$('#s5hv'+i).textContent=Math.round(u.h*p)+'%';
+      $('#s5d'+i).style.width=u.d*p+'%';$('#s5dv'+i).textContent=Math.round(u.d*p)+'%'});
+    document.querySelectorAll('#s5spark .sp').forEach((el,k)=>{el.style.strokeDashoffset=1-clamp((lt-1.8-k*0.3)/2.2)});
+  },
+  // S6
+  (lt)=>{
+    const f=$('#s6file');const p=ease(clamp((lt-5.3)/1.6));
+    f.style.left=(630+p*230)+'px';f.style.top=(470-Math.sin(p*Math.PI)*60)+'px';
+    f.style.opacity=lt<5?0:(p>=1?0:1);
+    $('#s6got').style.opacity=p>=1?1:0;
+  },
+  null,null
+];
+
+function render(){
+  const si=sceneAt(t), lt=warp(si,t-starts[si]);
+  scenes.forEach((s,i)=>s.classList.toggle('active',i===si));
+  const sc=scenes[si];
+  sc.querySelectorAll('.a').forEach(el=>{
+    if(el.id==='s6file')return;
+    const at=+el.dataset.at||0, p=ease(clamp((lt-at)/0.55));
+    el.style.opacity=p;el.style.transform=`translateY(${(1-p)*18}px)`;
+  });
+  custom[si]&&custom[si](lt);
+  const caps=CAPS[si]||[];let txt='';caps.forEach(c=>{if(lt>=c[0])txt=c[1]});
+  const cap=$('#cap');cap.textContent=txt;cap.style.opacity=txt?1:0;
+  const out=clamp((+sc.dataset.dur-lt)/0.4), inn=clamp(lt/0.3);
+  sc.style.opacity=Math.min(out,inn);
+  $('#prog i').style.width=(t/TOTAL*100)+'%';
+  const fm=s=>Math.floor(s/60)+':'+String(Math.floor(s%60)).padStart(2,'0');
+  $('#time').textContent=fm(t)+' / '+fm(TOTAL);
+  chips.querySelectorAll('span').forEach((c,i)=>c.classList.toggle('on',i===si));
+}
+let t=0,playing=false,last=performance.now();
+const au=$('#au');let muted=false;
+function syncAudio(){ if(!playing){au.pause();return}
+  if(Math.abs(au.currentTime-t)>0.25)au.currentTime=t;
+  if(au.paused)au.play().catch(()=>{}); }
+function setPlay(v){playing=v;$('#bPlay').textContent=playing?'⏸ 暂停':'▶ 播放';syncAudio()}
+function loop(now){
+  const dt=(now-last)/1000;last=now;
+  if(playing){
+    if(!au.paused&&!au.ended&&au.readyState>=2)t=au.currentTime; else t+=dt;
+    if(t>=TOTAL){t=TOTAL-0.001;setPlay(false)}
+  }
+  render();requestAnimationFrame(loop);
+}
+$('#gate button').onclick=()=>{$('#gate').style.display='none';t=0;setPlay(true)};
+$('#bPlay').onclick=()=>{$('#gate').style.display='none';if(t>=TOTAL-0.01)t=0;setPlay(!playing)};
+$('#bRe').onclick=()=>{$('#gate').style.display='none';t=0;au.currentTime=0;setPlay(true)};
+$('#bMute').onclick=()=>{muted=!muted;au.muted=muted;$('#bMute').textContent=muted?'🔇 已静音':'🔊 声音开'};
+$('#prog').onclick=e=>{const r=e.currentTarget.getBoundingClientRect();t=clamp((e.clientX-r.left)/r.width)*TOTAL;au.currentTime=t;render()};
+chips.onclick=e=>{const i=e.target.dataset.i;if(i!=null){t=starts[+i]+0.01;au.currentTime=t;render()}};
+document.addEventListener('keydown',e=>{if(e.code==='Space'){e.preventDefault();$('#bPlay').click()}});
+
+function fit(){
+  const w=Math.min(document.documentElement.clientWidth-32,1280);
+  const h=window.innerHeight-120;
+  let s=Math.max(0.2,Math.min(w/1280,h>300?h/720:w/1280));
+  if(document.body.classList.contains('frames'))s=1;
+  $('#stage').style.transform=`scale(${s})`;
+  const vp=$('#viewport');vp.style.width=1280*s+'px';vp.style.height=720*s+'px';
+}
+window.addEventListener('resize',fit);
+// ?t=秒 定格到某一帧（便于截图）
+const q=new URLSearchParams(location.search);
+if(q.has('t')){t=+q.get('t');$('#gate').style.display='none'}
+if(q.has('frames')){document.body.classList.add('frames');window.__seek=x=>{t=x;render()};window.__TOTAL=TOTAL}
+fit();requestAnimationFrame(loop);
+</script>
+</body>
+</html>
