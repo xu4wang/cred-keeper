@@ -12,6 +12,7 @@ import { acquireLegacy, legacyStale, release, releaseLegacy, tryAcquire } from '
 import { keychainItemExists, keychainServiceFor, nextProbeSeq, probeKeychainGate, type GateState } from './keychain.ts';
 import { refreshToken, type Http } from './oauth.ts';
 import { runScript, succeeded } from './scripts.ts';
+import { accountLabel, type LabelSource } from './label.ts';
 import { ensureDir0700, fingerprint, nowIso, parseJsonObject, readFileNoFollow, writeFileAtomic0600 } from './util.ts';
 
 /** Marker for a pending record that exists only in memory. */
@@ -23,6 +24,9 @@ export type Emit = (account: string | null, type: string, level: Level, data?: R
 
 export interface AccountStatus {
   id: string;
+  /** Display name: config `label`, else the logged-in e-mail's local part, else the id. */
+  label: string;
+  labelSource: LabelSource;
   provider: string;
   credentialPath: string;
   state: State;
@@ -530,6 +534,7 @@ export class Account {
     if (v) next = nowIso(Math.max(now, v.expiresAt - this.cfg.marginMin * 60_000 + this.jitterMs));
     return {
       id: this.cfg.id,
+      ...accountLabel(this.cfg),
       provider: this.cfg.provider,
       credentialPath: this.cfg.credentialPath,
       state: this.state,

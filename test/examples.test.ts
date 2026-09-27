@@ -39,7 +39,17 @@ test('default hook: seeds shared bots, never a bot with its own account, then su
   assert.equal(r.status, 0, r.stderr);
   assert.equal(readFileSync(join(home, '.botmux/bots/cli_shared/claude/.credentials.json'), 'utf-8'), 'NEW-CRED');
   assert.equal(readFileSync(join(home, '.botmux/bots/cli_own/claude/.credentials.json'), 'utf-8'), 'OLD-cli_own', 'own-account bot untouched');
+  assert.equal(readFileSync(join(home, 'calls'), 'utf-8').trim(), 'suspend --bot cli_shared',
+    'with an own-account bot present, only the shared-account bots are suspended');
+});
+
+test('default hook: no bot has its own account → suspend all (also covers bots missing from bots.json)', () => {
+  const { home, cli } = fakeHome(`require('fs').appendFileSync(process.env.HOME + '/calls', process.argv.slice(2).join(' ') + '\\n');`);
+  writeFileSync(join(home, '.botmux', 'bots.json'), JSON.stringify([{ larkAppId: 'cli_shared' }, { larkAppId: 'cli_own' }]));
+  const r = run(home, { BOTMUX_CLI: cli });
+  assert.equal(r.status, 0, r.stderr);
   assert.equal(readFileSync(join(home, 'calls'), 'utf-8').trim(), 'suspend all');
+  assert.equal(readFileSync(join(home, '.botmux/bots/cli_own/claude/.credentials.json'), 'utf-8'), 'NEW-CRED');
 });
 
 test('default hook: botmux that cannot run fails the hook (no silent success)', () => {
@@ -76,7 +86,13 @@ test('default hook: finds botmux from the exec line of ~/.botmux/bin/botmux when
   writeFileSync(join(home, '.botmux', 'bin', 'botmux'), `#!/bin/sh\nexec node "${cli}" "$@"\n`);
   const r = run(home, {});
   assert.equal(r.status, 0, r.stderr);
-  assert.equal(readFileSync(join(home, 'calls'), 'utf-8').trim(), 'suspend all');
+  assert.equal(readFileSync(join(home, 'calls'), 'utf-8').trim(), 'suspend --bot cli_shared');
+  // Newer botmux writes the node path quoted too: exec "/abs/node" "/abs/dist/cli.js" "$@"
+  writeFileSync(join(home, 'calls'), '');
+  writeFileSync(join(home, '.botmux', 'bin', 'botmux'), `#!/bin/sh\nexec "${process.execPath}" "${cli}" "$@"\n`);
+  const r2 = run(home, {});
+  assert.equal(r2.status, 0, r2.stderr);
+  assert.equal(readFileSync(join(home, 'calls'), 'utf-8').trim(), 'suspend --bot cli_shared');
   const { home: bare } = fakeHome('');
   assert.equal(run(bare, {}).status, 127, 'no wrapper and no BOTMUX_CLI → fails loudly');
 });

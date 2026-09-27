@@ -51,6 +51,7 @@ See `examples/config.json`.
 | `accounts[].credentialPath` | The published credential file |
 | `accounts[].onRefreshed` | Script run after each refresh, see below |
 | `accounts[].legacyLockDir` | Also hold the legacy cron lock (mkdir + pid) while refreshing this account |
+| `accounts[].label` | Optional display name. Default: the local part (before `@`) of the e-mail the CLI is logged in with, read from the claude config next to the credential file (`~/.claude/…` → `~/.claude.json`, otherwise `<dir>/.claude.json`); the account id if none. Only the local part is ever returned |
 | `alert.script` | Alert delivery script; if unset, no alerts are sent |
 | `alert.minLevel` | `info` / `warn` / `error` / `critical`; default `error` |
 | `alert.heartbeat` | `HH:MM` daily summary; if unset, no heartbeat |
@@ -89,7 +90,7 @@ Examples in `examples/`:
 | path | |
 |-|-|
 | `/healthz` | liveness, accounts, whether alerts are enabled |
-| `/v1/accounts`, `/v1/accounts/{id}` | state, fingerprints, AT/RT expiry, last refresh, failures, usage (+ recent events) |
+| `/v1/accounts`, `/v1/accounts/{id}` | display name (`label`, `labelSource` = `config` / `claude-login` / `id`), state, fingerprints, AT/RT expiry, last refresh, failures, usage (+ recent events) |
 | `/v1/accounts/{id}/usage`, `/v1/accounts/{id}/usage/history?since=24h` | usage snapshot / series |
 | `/v1/usage` | usage for all accounts |
 | `/v1/events?account=&type=&since=&limit=` | event log (exit codes and durations only, never script output) |

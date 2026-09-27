@@ -258,7 +258,7 @@ export class Service {
       accounts: [...this.accounts.values()].map((a) => {
         const s = a.status();
         const u = this.usage.get(a.cfg.id);
-        return { id: s.id, state: s.state, atLeftMin: s.accessToken.leftMin, rtLeftDays: s.refreshToken.leftDays,
+        return { id: s.id, label: s.label, state: s.state, atLeftMin: s.accessToken.leftMin, rtLeftDays: s.refreshToken.leftDays,
           fiveHour: u?.fiveHour.utilization ?? null, sevenDay: u?.sevenDay.utilization ?? null };
       }),
     });

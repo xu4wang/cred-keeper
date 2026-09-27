@@ -7,6 +7,8 @@ export const LEVELS: Level[] = ['info', 'warn', 'error', 'critical'];
 
 export interface AccountConfig {
   id: string;
+  /** Display name override; default is the logged-in e-mail's local part (see label.ts). */
+  label?: string;
   provider: 'claude-oauth';
   credentialPath: string;
   onRefreshed?: string;
@@ -77,6 +79,7 @@ export function loadConfig(path: string): Config {
     seenPaths.add(credentialPath);
     accounts.push({
       id,
+      label: a.label === undefined ? undefined : nonEmptyLabel(a.label, `accounts[${i}].label`),
       provider: 'claude-oauth',
       credentialPath,
       onRefreshed: a.onRefreshed ? absPath(String(a.onRefreshed), `accounts[${i}].onRefreshed`) : undefined,
@@ -131,4 +134,9 @@ export function paths(cfg: Config) {
     db: join(cfg.dataDir, 'state.db'),
     logDir: join(cfg.dataDir, 'logs'),
   };
+}
+
+function nonEmptyLabel(v: unknown, field: string): string {
+  if (typeof v !== 'string' || !v.trim() || v.length > 64) throw new Error(`${field} must be a non-empty string (≤64 chars)`);
+  return v.trim();
 }

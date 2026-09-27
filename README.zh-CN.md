@@ -57,6 +57,7 @@ npm ci --omit=dev
 | `accounts[].credentialPath` | 发布的凭证文件 |
 | `accounts[].onRefreshed` | 每次刷新后执行的脚本，见下文 |
 | `accounts[].legacyLockDir` | 刷新这个账号时，同时持有旧 cron 的锁（mkdir + pid） |
+| `accounts[].label` | 可选的显示名。不配置时，取 CLI 登录邮箱 @ 前面的部分，从凭证文件旁边的 claude 配置里读（`~/.claude/…` 对应 `~/.claude.json`，其他目录对应 `<目录>/.claude.json`）；都取不到就用账号 id。对外只返回 @ 前面的部分 |
 | `alert.script` | 告警投递脚本；不配置就不发告警 |
 | `alert.minLevel` | `info` / `warn` / `error` / `critical`，默认 `error` |
 | `alert.heartbeat` | 每日汇总的时间，格式 `HH:MM`；不配置就不发心跳 |
@@ -95,7 +96,7 @@ npm ci --omit=dev
 | 路径 | 说明 |
 |-|-|
 | `/healthz` | 存活状态、账号列表、是否启用告警 |
-| `/v1/accounts`、`/v1/accounts/{id}` | 状态、指纹、AT/RT 到期时间、上次刷新、连续失败次数、用量（单个账号还带最近的事件） |
+| `/v1/accounts`、`/v1/accounts/{id}` | 显示名（`label`，`labelSource` 取值 `config` / `claude-login` / `id`）、状态、指纹、AT/RT 到期时间、上次刷新、连续失败次数、用量（单个账号还带最近的事件） |
 | `/v1/accounts/{id}/usage`、`/v1/accounts/{id}/usage/history?since=24h` | 用量快照 / 时间序列 |
 | `/v1/usage` | 所有账号的用量 |
 | `/v1/events?account=&type=&since=&limit=` | 事件日志（只含退出码和耗时，不含脚本输出） |

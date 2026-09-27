@@ -25,7 +25,8 @@ let raw = ""; process.stdin.on("data", (c) => raw += c).on("end", () => {
   if (ev.type === "heartbeat" && Array.isArray(d.accounts)) {
     for (const a of d.accounts) {
       const mark = a.state === "ok" ? "✅" : "⚠️";
-      lines.push(`${mark} ${a.id}  ${a.state} · AT 剩 ${fmtMin(a.atLeftMin)} · RT 剩 ${a.rtLeftDays ?? "–"} 天 · 用量 5h ${pct(a.fiveHour)} / 7d ${pct(a.sevenDay)}`);
+      const name = a.label && a.label !== a.id ? `${a.id}(${a.label})` : a.id;
+      lines.push(`${mark} ${name}  ${a.state} · AT 剩 ${fmtMin(a.atLeftMin)} · RT 剩 ${a.rtLeftDays ?? "–"} 天 · 用量 5h ${pct(a.fiveHour)} / 7d ${pct(a.sevenDay)}`);
     }
   } else {
     if (ev.account) lines.push(`账号：${ev.account}`);
