@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude 账号用量</title>
+<!-- cred-keeper dashboard: a static page that reads only cred-keeper's read-only REST API. -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+<style>
+:root {
+  --surface-0: #f4f4f2; --surface-1: #fcfcfb; --border: #e6e5df;
+  --text-primary: #0b0b0b; --text-secondary: #52514e; --text-muted: #7a7973; --grid: #ecebe6;
+  --good: #1a7f37; --warn: #b26a00; --crit: #c62828;
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --surface-0: #111110; --surface-1: #1a1a19; --border: #2f2e2b;
+    --text-primary: #ffffff; --text-secondary: #c3c2b7; --text-muted: #8f8e86; --grid: #2a2a27;
+    --good: #4cc26a; --warn: #e3a63b; --crit: #ef6b6b;
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--surface-0); color: var(--text-primary);
+  font: 14px/1.5 -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Segoe UI", sans-serif; }
+header { padding: 20px 24px 8px; display: flex; flex-wrap: wrap; align-items: baseline; gap: 12px 20px; }
+h1 { font-size: 20px; margin: 0; font-weight: 600; }
+.meta { color: var(--text-secondary); font-size: 13px; }
+.meta button { margin-left: 8px; font: inherit; color: inherit; background: var(--surface-1); border: 1px solid var(--border);
+  border-radius: 6px; padding: 2px 10px; cursor: pointer; }
+main { padding: 8px 24px 32px; display: grid; gap: 16px; }
+section.panel { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; }
+h2 { font-size: 15px; margin: 0 0 10px; font-weight: 600; display: flex; gap: 10px; align-items: baseline; }
+h2 .sub { color: var(--text-muted); font-weight: 400; font-size: 12px; }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+th { color: var(--text-secondary); font-weight: 500; font-size: 12px; }
+tr:last-child td { border-bottom: none; }
+.acct { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
+.dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.muted { color: var(--text-muted); font-weight: 400; }
+.bar { display: inline-flex; align-items: center; gap: 8px; min-width: 150px; }
+.track { display: inline-block; width: 90px; height: 8px; border-radius: 4px; background: var(--grid); overflow: hidden; }
+.fill { display: block; height: 100%; border-radius: 4px; }
+.pill { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; border: 1px solid currentColor; }
+.ok { color: var(--good); } .warnc { color: var(--warn); } .critc { color: var(--crit); }
+.charts { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 12px; }
+.chart { position: relative; height: 200px; }
+.chart h3 { font-size: 12px; font-weight: 500; color: var(--text-secondary); margin: 0 0 4px; }
+.err { color: var(--crit); }
+.logins li { margin: 3px 0; }
+.scroll { overflow-x: auto; }
+@media (max-width: 760px) { header, main { padding-left: 16px; padding-right: 16px; } .charts { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Claude 账号用量</h1>
+  <div class="meta"><span id="updated">加载中…</span><button id="refresh" type="button">刷新</button></div>
+  <div class="meta">数据来自各机 cred-keeper（每 10 分钟采样，页面每分钟自动刷新）；时间为你的浏览器本地时间</div>
+</header>
+<main>
+  <section class="panel">
+    <h2>需要手工 /login 的日期 <span class="sub">RT 到期时间，按先后排序；🔴 &lt;3 天 · 🟠 &lt;10 天</span></h2>
+    <ul class="logins" id="logins"><li class="muted">加载中…</li></ul>
+  </section>
+  <div id="machines" style="display:grid;gap:16px"></div>
+</main>
+<script>
+// Machines come from sites.json next to this page: [{ "key": "<api path segment>", "name": "<display name>" }, …].
+// Each key is served by the reverse proxy at /api/<key>/ → that machine's cred-keeper (see nginx.example.conf).
+let MACHINES = [];
+const SERIES = ['--s1', '--s2', '--s3', '--s4'];
+const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const charts = {};
+
+const fmtTime = (iso) => iso ? new Date(iso).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }) : '–';
+const fmtMin = (m) => m == null ? '–' : m >= 60 ? `${Math.floor(m / 60)}h${String(m % 60).padStart(2, '0')}m` : `${m}m`;
+const pctClass = (v) => v == null ? '' : v >= 90 ? 'critc' : v >= 70 ? 'warnc' : '';
+function bar(v, color) {
+  const w = v == null ? 0 : Math.min(100, v);
+  return `<span class="bar"><span class="track"><span class="fill" style="width:${w}%;background:${color}"></span></span><span class="${pctClass(v)}">${v == null ? '–' : v + '%'}</span></span>`;
+}
+async function getJson(url) {
+  const r = await fetch(url, { cache: 'no-store' });
+  if (!r.ok) throw new Error(`${url} → HTTP ${r.status}`);
+  return r.json();
+}
+async function loadMachine(m) {
+  const base = `/api/${m.key}`;
+  const accounts = await getJson(`${base}/v1/accounts`);
+  const hist = await Promise.all(accounts.map((a) => getJson(`${base}/v1/accounts/${encodeURIComponent(a.id)}/usage/history?since=7d`).catch(() => [])));
+  return accounts.map((a, i) => ({ ...a, history: hist[i] }));
+}
+function stateCell(a) {
+  const cls = a.state === 'ok' ? 'ok' : (a.state === 'critical' || a.state === 'dead' || a.state === 'breaker') ? 'critc' : 'warnc';
+  return `<span class="pill ${cls}">${a.state}</span>`;
+}
+function renderMachine(m, accounts, err) {
+  let el = document.getElementById(`m-${m.key}`);
+  if (!el) {
+    el = document.createElement('section'); el.className = 'panel'; el.id = `m-${m.key}`;
+    el.innerHTML = `<h2>${m.name} <span class="sub"></span></h2><div class="body scroll"></div>
+      <div class="charts"><div><h3>5 小时窗口（%）</h3><div class="chart"><canvas id="c5-${m.key}"></canvas></div></div>
+      <div><h3>7 天窗口（%）</h3><div class="chart"><canvas id="c7-${m.key}"></canvas></div></div></div>`;
+    document.getElementById('machines').appendChild(el);
+  }
+  const body = el.querySelector('.body');
+  if (err) { body.innerHTML = `<p class="err">取数失败：${err}</p>`; el.querySelector('.sub').textContent = ''; return; }
+  el.querySelector('.sub').textContent = `${accounts.length} 个账号`;
+  const rows = accounts.map((a, i) => {
+    const u = a.usage || {}; const fh = u.fiveHour || {}; const sd = u.sevenDay || {};
+    const color = css(SERIES[i % SERIES.length]);
+    return `<tr>
+      <td><span class="acct"><span class="dot" style="background:${color}"></span>${a.label || a.id}<span class="muted">${a.label && a.label !== a.id ? a.id : ''}</span></span></td>
+      <td>${stateCell(a)}</td>
+      <td>${bar(fh.utilization, color)}</td><td>${fmtTime(fh.resetsAt)}</td>
+      <td>${bar(sd.utilization, color)}</td><td>${sd.projected == null ? '–' : sd.projected + '%'}</td><td>${fmtTime(sd.resetsAt)}</td>
+      <td>${fmtMin(a.accessToken?.leftMin)}</td><td>${fmtTime(a.refreshToken?.expiresAt)}</td>
+      <td>${a.lastRefresh ? fmtTime(a.lastRefresh.at) + (a.lastRefresh.result === 'ok' ? '' : ' ⚠️') : '–'}</td></tr>`;
+  }).join('');
+  body.innerHTML = `<table><thead><tr><th>账号</th><th>状态</th><th>5h 用量</th><th>5h 重置</th><th>7d 用量</th><th>7d 预测</th><th>7d 重置</th><th>AT 剩余</th><th>RT 到期</th><th>上次刷新（服务启动后）</th></tr></thead><tbody>${rows}</tbody></table>`;
+  for (const [key, id] of [['fiveHour', `c5-${m.key}`], ['sevenDay', `c7-${m.key}`]]) {
+    const datasets = accounts.map((a, i) => ({
+      label: a.label || a.id, borderColor: css(SERIES[i % SERIES.length]), backgroundColor: css(SERIES[i % SERIES.length]),
+      borderWidth: 2, pointRadius: 0, pointHoverRadius: 4, tension: 0,
+      data: (a.history || []).filter((r) => r.payload?.[key]).map((r) => ({ x: r.at, y: r.payload[key].utilization })),
+    }));
+    const opts = {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: { legend: { display: accounts.length > 1, labels: { color: css('--text-secondary'), boxWidth: 10, boxHeight: 10 } },
+        tooltip: { callbacks: { label: (c) => `${c.dataset.label}: ${c.parsed.y}%` } } },
+      scales: {
+        x: { type: 'time', time: { tooltipFormat: 'MM-dd HH:mm', displayFormats: { minute: 'HH:mm', hour: 'MM-dd HH:mm', day: 'MM-dd' } },
+          grid: { display: false }, ticks: { color: css('--text-muted'), maxRotation: 0, autoSkipPadding: 20 } },
+        y: { min: 0, max: 100, grid: { color: css('--grid') }, ticks: { color: css('--text-muted'), stepSize: 25, callback: (v) => v + '%' } },
+      },
+    };
+    if (charts[id]) { charts[id].data.datasets = datasets; charts[id].options = opts; charts[id].update(); }
+    else charts[id] = new Chart(document.getElementById(id), { type: 'line', data: { datasets }, options: opts });
+  }
+}
+function renderLogins(all) {
+  const now = Date.now();
+  const items = all.filter((x) => x.a.refreshToken?.expiresAt)
+    .map((x) => ({ ...x, t: Date.parse(x.a.refreshToken.expiresAt) })).sort((p, q) => p.t - q.t)
+    .map(({ m, a, t }) => {
+      const days = (t - now) / 86400000;
+      const mark = days < 3 ? '🔴' : days < 10 ? '🟠' : '🟢';
+      return `<li>${mark} <b>${fmtTime(new Date(t).toISOString())}</b>（剩 ${days.toFixed(1)} 天）${m.name} / ${a.label || a.id}</li>`;
+    });
+  document.getElementById('logins').innerHTML = items.join('') || '<li class="muted">无数据</li>';
+}
+async function loadSites() {
+  try {
+    const list = await getJson('sites.json');
+    if (!Array.isArray(list) || !list.length) throw new Error('sites.json must be a non-empty array');
+    MACHINES = list.map((x) => ({ key: String(x.key), name: String(x.name ?? x.key) }));
+  } catch (e) {
+    MACHINES = [];
+    document.getElementById('machines').innerHTML = `<section class="panel err">无法读取 sites.json：${e.message}</section>`;
+  }
+}
+async function refresh() {
+  if (!MACHINES.length) await loadSites();
+  if (!MACHINES.length) return;
+  const results = await Promise.allSettled(MACHINES.map(loadMachine));
+  const all = [];
+  results.forEach((r, i) => {
+    const m = MACHINES[i];
+    if (r.status === 'fulfilled') { renderMachine(m, r.value); r.value.forEach((a) => all.push({ m, a })); }
+    else renderMachine(m, null, r.reason?.message || String(r.reason));
+  });
+  renderLogins(all);
+  document.getElementById('updated').textContent = `更新于 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`;
+}
+document.getElementById('refresh').addEventListener('click', refresh);
+refresh();
+setInterval(refresh, 60_000);
+</script>
+</body>
+</html>

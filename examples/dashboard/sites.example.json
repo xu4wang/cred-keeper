@@ -1,0 +1,4 @@
+[
+  { "key": "local", "name": "this machine" },
+  { "key": "host-b", "name": "host-b" }
+]

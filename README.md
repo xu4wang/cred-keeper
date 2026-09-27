@@ -96,6 +96,14 @@ Examples in `examples/`:
 | `/v1/events?account=&type=&since=&limit=` | event log (exit codes and durations only, never script output) |
 | `/metrics` | Prometheus text |
 
+## Dashboard (optional)
+
+`examples/dashboard/` is a static page that shows every account of one or more cred-keeper instances: display name, state, 5-hour / 7-day usage with reset times and projection, AT time left, RT expiry (when a manual login is due), and 7-day usage charts. It refreshes every minute and only reads the GET API above, so the service itself stays API-only.
+
+1. Copy `index.html` to a directory your web server can read, next to a `sites.json` listing the instances (see `sites.example.json`): `[{ "key": "<path segment>", "name": "<display name>" }]`.
+2. Serve it and proxy `/api/<key>/` to each instance on the same origin, allowing only GET/HEAD (see `nginx.example.conf`). Same-origin proxying avoids CORS; the service itself does not send CORS headers.
+3. Charts use Chart.js from the jsdelivr CDN, so viewers' browsers need to reach it.
+
 ## CLI
 
 ```

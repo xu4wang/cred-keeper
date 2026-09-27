@@ -102,6 +102,14 @@ npm ci --omit=dev
 | `/v1/events?account=&type=&since=&limit=` | 事件日志（只含退出码和耗时，不含脚本输出） |
 | `/metrics` | Prometheus 文本格式 |
 
+## 用量看板（可选）
+
+`examples/dashboard/` 是一个静态页面，展示一个或多个 cred-keeper 实例的全部账号：显示名、状态、5 小时 / 7 天用量（含重置时间和预测）、AT 剩余时间、RT 到期时间（也就是什么时候需要手工登录），以及 7 天用量曲线。页面每分钟自动刷新，只调用上面那些 GET 接口，服务本身仍然只提供 API。
+
+1. 把 `index.html` 放到 Web 服务器能读到的目录，同目录放一个 `sites.json` 列出各实例（参考 `sites.example.json`）：`[{ "key": "<路径段>", "name": "<显示名>" }]`
+2. 用 Web 服务器发布这个目录，并在同一个域名下把 `/api/<key>/` 转发到各实例，只放行 GET/HEAD（参考 `nginx.example.conf`）。同域转发可以避开跨域问题，服务本身不发送 CORS 头
+3. 图表用的是 jsdelivr CDN 上的 Chart.js，打开页面的浏览器需要能访问这个 CDN
+
 ## 命令行
 
 ```
