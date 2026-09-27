@@ -104,6 +104,8 @@ npm ci --omit=dev
 
 ## 用量看板（可选）
 
+![用量看板（演示数据）](docs/dashboard.png)
+
 `examples/dashboard/` 是一个静态页面，展示一个或多个 cred-keeper 实例的全部账号：显示名、状态、5 小时 / 7 天用量（含重置时间和预测）、AT 剩余时间、RT 到期时间（也就是什么时候需要手工登录），以及 7 天用量曲线。页面每分钟自动刷新，只调用上面那些 GET 接口，服务本身仍然只提供 API。
 
 1. 把 `index.html` 放到 Web 服务器能读到的目录，同目录放一个 `sites.json` 列出各实例（参考 `sites.example.json`）：`[{ "key": "<路径段>", "name": "<显示名>" }]`

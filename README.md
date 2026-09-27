@@ -98,6 +98,8 @@ Examples in `examples/`:
 
 ## Dashboard (optional)
 
+![Dashboard (demo data)](docs/dashboard.png)
+
 `examples/dashboard/` is a static page that shows every account of one or more cred-keeper instances: display name, state, 5-hour / 7-day usage with reset times and projection, AT time left, RT expiry (when a manual login is due), and 7-day usage charts. It refreshes every minute and only reads the GET API above, so the service itself stays API-only.
 
 1. Copy `index.html` to a directory your web server can read, next to a `sites.json` listing the instances (see `sites.example.json`): `[{ "key": "<path segment>", "name": "<display name>" }]`.
