@@ -34,6 +34,9 @@ function title(type: string, account: string | null, data: Record<string, unknow
     case 'usage_high': return `${a}用量偏高：${String(data.window)} ${String(data.value)}%`;
     case 'usage_locked': return `${a}已被限流锁定：${String(data.window)} ${String(data.reason)}`;
     case 'recovered': return `${a}已恢复（${String(data.from)}）`;
+    case 'refresh_deferred': return `${a}使用方正忙，推迟刷新（AT 剩 ${String(data.leftMin)} 分钟，最多推迟 ${String(data.maxDeferMin)} 分钟）`;
+    case 'refresh_defer_ended': return `${a}结束推迟（${String(data.reason)}），共推迟 ${String(data.deferredMin)} 分钟`;
+    case 'pre_refresh_failed': return `${a}preRefresh 脚本失败，照常刷新`;
     case 'heartbeat': return '凭证心跳';
     default: return `${a}${type}`;
   }
@@ -189,7 +192,12 @@ export class Service {
       const cur = a.reconcileLocked();
       if (!cur || cur === 'locked') return;
       this.rtWarn(a, cur.refreshTokenExpiresAt);
-      if (a.state !== 'critical' && a.isDue(cur)) { await a.refresh(); return; }
+      if (a.state !== 'critical' && a.isDue(cur)) {
+        if (!(await a.shouldDefer(cur))) { await a.refresh(); return; }
+      } else {
+        // Not due any more (a login or another process moved the vault on), or critical.
+        a.endDeferral(a.isDue(cur) ? 'critical' : 'not_due', cur);
+      }
       await this.pollUsage(a, cur.accessToken);
     } catch (e) {
       this.emit(a.cfg.id, 'internal_error', 'error', { error: (e as Error).message });

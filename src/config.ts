@@ -13,6 +13,15 @@ export interface AccountConfig {
   credentialPath: string;
   onRefreshed?: string;
   hookTimeoutSec: number;
+  /**
+   * Optional gate run before a due refresh. Exit 75 (EX_TEMPFAIL) = consumers are
+   * busy, defer; anything else = go. A refresh revokes the old access token at once,
+   * so a turn in flight at that moment fails: the gate lets the refresh wait for idle.
+   */
+  preRefresh?: string;
+  preRefreshTimeoutSec: number;
+  /** Longest a refresh may be deferred by preRefresh, counted from the first deferral. */
+  preRefreshMaxDeferMin: number;
   marginMin: number;
   redMin: number;
   rtWarnDays: number;
@@ -84,6 +93,9 @@ export function loadConfig(path: string): Config {
       credentialPath,
       onRefreshed: a.onRefreshed ? absPath(String(a.onRefreshed), `accounts[${i}].onRefreshed`) : undefined,
       hookTimeoutSec: num(a.hookTimeoutSec, 60, `accounts[${i}].hookTimeoutSec`, 1),
+      preRefresh: a.preRefresh ? absPath(String(a.preRefresh), `accounts[${i}].preRefresh`) : undefined,
+      preRefreshTimeoutSec: num(a.preRefreshTimeoutSec, 20, `accounts[${i}].preRefreshTimeoutSec`, 1),
+      preRefreshMaxDeferMin: num(a.preRefreshMaxDeferMin, 60, `accounts[${i}].preRefreshMaxDeferMin`, 0),
       marginMin: num(a.marginMin, defaults.marginMin, `accounts[${i}].marginMin`, 1),
       redMin: num(a.redMin, defaults.redMin, `accounts[${i}].redMin`, 0),
       rtWarnDays: num(a.rtWarnDays, defaults.rtWarnDays, `accounts[${i}].rtWarnDays`, 0),

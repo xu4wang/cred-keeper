@@ -34,6 +34,8 @@ export interface AccountStatus {
   accessToken: { expiresAt: string | null; leftMin: number | null };
   refreshToken: { expiresAt: string | null; leftDays: number | null };
   nextRefreshAt: string | null;
+  /** Set while a due refresh is being held back by the preRefresh gate. */
+  refreshDeferredSince: string | null;
   lastRefresh: { at: string; result: string; rotatedRt?: boolean } | null;
   consecutiveFailures: number;
 }
@@ -47,6 +49,8 @@ export class Account {
   /** Vault fingerprint the current dead/critical state applies to; a different vault clears it. */
   stuckFingerprint: string | null = null;
   jitterMs: number;
+  /** When the preRefresh gate first deferred the current due refresh; null when not deferring. */
+  deferredSince: number | null = null;
   private refreshing = false;
 
   cfg: AccountConfig;
@@ -402,6 +406,61 @@ export class Account {
     return left <= this.cfg.marginMin * 60_000 - this.jitterMs;
   }
 
+  /**
+   * preRefresh gate for a due refresh. True = hold the refresh back this tick.
+   * Never defers once the AT is within redMin or the deferral has lasted
+   * preRefreshMaxDeferMin; a failing gate (crash, timeout, other exit code) does not
+   * defer either: refreshing on time matters more than sparing one turn.
+   */
+  async shouldDefer(cur: OauthCred): Promise<boolean> {
+    const end = (reason: string): false => { this.endDeferral(reason, cur); return false; };
+    // Removed by a hot reload, or a zero budget: no gate.
+    if (!this.cfg.preRefresh || this.cfg.preRefreshMaxDeferMin <= 0) return end('gate_removed');
+    const now = this.now();
+    const leftMs = cur.expiresAt - now;
+    // Checked before and again after the script: a slow gate must not carry a
+    // "busy" answer past the floor or past the deferral budget.
+    // The episode starts at the first deferral; for a first "busy" that is `now` (before the script ran).
+    const limit = (at: number): string | null => {
+      if (cur.expiresAt - at <= this.cfg.redMin * 60_000) return 'floor';
+      if (at - (this.deferredSince ?? now) >= this.cfg.preRefreshMaxDeferMin * 60_000) return 'max_defer';
+      return null;
+    };
+    const before = limit(now);
+    if (before) return end(before);
+    const r = await runScript({
+      script: this.cfg.preRefresh,
+      env: { CK_ACCOUNT: this.cfg.id, CK_EVENT: 'pre_refresh', CK_CREDENTIAL_PATH: this.cfg.credentialPath,
+        CK_AT_LEFT_MIN: String(Math.round(leftMs / 60_000)) },
+      timeoutMs: this.cfg.preRefreshTimeoutSec * 1000, logDir: this.p.logDir, label: `preRefresh:${this.cfg.id}`,
+    });
+    if (r.code === 75 && !r.timedOut && !r.error) {
+      const after = limit(this.now());
+      if (after) return end(after);
+      if (this.deferredSince === null) {
+        this.deferredSince = now;
+        this.emit(this.cfg.id, 'refresh_deferred', 'info', { leftMin: Math.round(leftMs / 60_000), maxDeferMin: this.cfg.preRefreshMaxDeferMin });
+      }
+      return true;
+    }
+    if (!succeeded(r)) {
+      this.emit(this.cfg.id, 'pre_refresh_failed', 'warn', { code: r.code, signal: r.signal, timedOut: r.timedOut, ms: r.ms, error: r.error });
+      return end('gate_failed');
+    }
+    return end('idle');
+  }
+
+  /** Close a deferral episode (if one is open) with the reason it ended. */
+  endDeferral(reason: string, cur: OauthCred | null): void {
+    if (this.deferredSince === null) return;
+    const now = this.now();
+    this.emit(this.cfg.id, 'refresh_defer_ended', reason === 'idle' || reason === 'not_due' ? 'info' : 'warn', {
+      reason, deferredMin: Math.round((now - this.deferredSince) / 60_000),
+      leftMin: cur ? Math.round((cur.expiresAt - now) / 60_000) : null,
+    });
+    this.deferredSince = null;
+  }
+
   /** One refresh attempt. `force` skips the due check (manual CLI). */
   async refresh(force = false): Promise<string> {
     if (this.refreshing) return 'busy';
@@ -545,6 +604,7 @@ export class Account {
         leftDays: v?.refreshTokenExpiresAt ? Math.floor((v.refreshTokenExpiresAt - now) / 86_400_000) : null,
       },
       nextRefreshAt: next,
+      refreshDeferredSince: this.deferredSince === null ? null : nowIso(this.deferredSince),
       lastRefresh: this.lastRefresh,
       consecutiveFailures: this.failures,
     };

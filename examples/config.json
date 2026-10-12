@@ -17,6 +17,7 @@
       "provider": "claude-oauth",
       "credentialPath": "~/.claude/.credentials.json",
       "onRefreshed": "~/.cred-keeper/hooks/on-refreshed-botmux-default.sh",
+      "preRefresh": "~/.cred-keeper/hooks/pre-refresh-botmux.sh",
       "hookTimeoutSec": 60,
       "legacyLockDir": "~/.botmux/logs/.cred-refresh.lock"
     }

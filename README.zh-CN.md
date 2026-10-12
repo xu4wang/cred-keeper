@@ -58,6 +58,7 @@ npm ci --omit=dev
 | `claudeBinary` | 要审计的 claude 二进制；服务会检查其中 client_id、接口路径和请求头是否还在 |
 | `accounts[].credentialPath` | 发布的凭证文件 |
 | `accounts[].onRefreshed` | 每次刷新后执行的脚本，见下文 |
+| `accounts[].preRefresh` | 可选。到了该刷新的时候先执行它，让刷新等到使用方空闲再做，见下文。另有 `preRefreshTimeoutSec`（默认 20）、`preRefreshMaxDeferMin`（默认 60） |
 | `accounts[].legacyLockDir` | 刷新这个账号时，同时持有旧 cron 的锁（mkdir + pid） |
 | `accounts[].label` | 可选的显示名。不配置时，取 CLI 登录邮箱 @ 前面的部分，从凭证文件旁边的 claude 配置里读（`~/.claude/…` 对应 `~/.claude.json`，其他目录对应 `<目录>/.claude.json`）；都取不到就用账号 id。对外只返回 @ 前面的部分 |
 | `alert.script` | 告警投递脚本；不配置就不发告警 |
@@ -68,7 +69,7 @@ npm ci --omit=dev
 
 ## 脚本
 
-两类脚本都直接执行（不经过 shell），各自运行在独立的进程组里。服务的 `PATH` 是 node 所在目录加上系统目录。botmux 和 lark-cli 都是 node 脚本，所以示例里用 `"$NODE" <脚本>` 的方式调用。你自己写脚本时也请用绝对路径。
+所有脚本都直接执行（不经过 shell），各自运行在独立的进程组里。服务的 `PATH` 是 node 所在目录加上系统目录。botmux 和 lark-cli 都是 node 脚本，所以示例里用 `"$NODE" <脚本>` 的方式调用。你自己写脚本时也请用绝对路径。
 
 **onRefreshed：**
 
@@ -77,6 +78,18 @@ npm ci --omit=dev
 | 环境变量 | `CK_ACCOUNT` `CK_EVENT=refreshed` `CK_CREDENTIAL_PATH` `CK_FINGERPRINT` `CK_AT_EXPIRES_AT` `CK_RT_EXPIRES_AT`。不传 token，需要时自己读文件 |
 | 超时 | `hookTimeoutSec`（默认 60 秒） |
 | 重试 | 在超时预算内重试 1 次；仍失败则发 `hook_failed`（critical） |
+
+**preRefresh：**
+
+刷新会立刻作废旧的 access token，正在用它的请求都会失败（claude 报 `provider_authentication_failed`，还可能把它自己那份凭证清空）。这个脚本让到期的刷新等到该账号的使用方空闲时再做。
+
+| 项目 | 约定 |
+|-|-|
+| 何时执行 | 到期待刷新期间，每次巡检（1 分钟）执行一次。CLI 强制刷新不执行 |
+| 环境变量 | `CK_ACCOUNT` `CK_EVENT=pre_refresh` `CK_CREDENTIAL_PATH` `CK_AT_LEFT_MIN` |
+| 退出码 | `75` = 忙，推迟到下一次巡检；`0` = 可以刷新。其他退出码、超时、启动失败也照常刷新，并记 `pre_refresh_failed`（warn）：按时刷新比保住一轮对话更重要 |
+| 上限 | AT 剩余不超过 `redMin` 分钟时不再推迟；连续推迟满 `preRefreshMaxDeferMin` 分钟后也不再推迟。推迟计时只在内存里：服务重启、或热加载重建了账号，都会重新计时，所以真正的硬上限是 `redMin` |
+| 事件 | `refresh_deferred`（info，每次推迟只记一次）、`refresh_defer_ended`（`reason` 为 `idle` / `not_due` 时是 info，为 `floor` / `max_defer` / `gate_failed` 时是 warn）。`/v1/accounts` 返回 `refreshDeferredSince` |
 
 **告警：**
 
@@ -91,6 +104,7 @@ npm ci --omit=dev
 
 - `on-refreshed-botmux-default.sh` — 播种各 bot 的凭证副本，然后 `botmux suspend all`（与旧 cron 脚本的行为一致）。bots.json 里配了 `credentialsSourceDir` 的 bot 会被跳过。botmux 本身跑不起来（退出码 126/127）时，脚本失败，触发 `hook_failed`；其他非 0 退出码（部分会话不活跃）照旧容忍。注意：旧脚本每次运行都发心跳，cred-keeper 改为每天一次汇总（`alert.heartbeat`）
 - `on-refreshed-botmux-account.sh` — 对使用独立账号的 bot 执行 `botmux suspend --bot <appId>`
+- `pre-refresh-botmux.sh` — preRefresh 示例：用 `botmux suspend --dry-run` 判断，只要这些 bot 有会话会被「排队」（正在回复中）就返回 75。只读，不会挂起任何会话。卡在「回复中」的会话会让它一直判忙，这时靠 `preRefreshMaxDeferMin` 兜住等待时长
 - `alert-lark.sh` — 通过 `lark-cli` 发飞书/Lark 私信
 
 ## 接口（只接受 GET）
