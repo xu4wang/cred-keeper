@@ -96,3 +96,48 @@ test('default hook: finds botmux from the exec line of ~/.botmux/bin/botmux when
   const { home: bare } = fakeHome('');
   assert.equal(run(bare, {}).status, 127, 'no wrapper and no BOTMUX_CLI → fails loudly');
 });
+
+const GATE = join(dirname(fileURLToPath(import.meta.url)), '..', 'examples', 'pre-refresh-botmux.sh');
+
+function runGate(fakeCliBody: string, bots?: string) {
+  const home = tmp();
+  const cli = join(home, 'fake-botmux.js');
+  writeFileSync(cli, fakeCliBody);
+  let gate = GATE;
+  if (bots !== undefined) {
+    gate = join(home, 'gate.sh');
+    writeFileSync(gate, readFileSync(GATE, 'utf-8').replace(/^BOTS=\(\)/m, `BOTS=(${bots})`));
+  }
+  return { home, r: spawnSync('/bin/bash', [gate], {
+    encoding: 'utf-8',
+    env: { HOME: home, PATH: `${NODE_DIR}:/usr/bin:/bin`, BOTMUX_CLI: cli },
+  }) };
+}
+
+const DRY = (lines: string[]) => `require('fs').appendFileSync(process.env.HOME + '/calls', process.argv.slice(2).join(' ') + '\\n'); console.log(${JSON.stringify(lines.join('\n'))});`;
+
+test('pre-refresh gate: a queued (in-turn) session → 75; only skips/suspends → 0; read-only dry-run', () => {
+  const busy = runGate(DRY(['· 将跳过（本就无存活 CLI）: aaaa1111  x', '· 将排队（正在回复，完成后自动挂起）: bbbb2222  y']));
+  assert.equal(busy.r.status, 75, busy.r.stderr);
+  assert.equal(readFileSync(join(busy.home, 'calls'), 'utf-8').trim(), 'suspend all --dry-run', 'empty BOTS → whole host, and always --dry-run');
+  const idle = runGate(DRY(['· 将跳过（本就无存活 CLI）: aaaa1111  x', '· 将挂起: cccc3333  z']));
+  assert.equal(idle.r.status, 0, idle.r.stderr);
+});
+
+test('pre-refresh gate: per-bot list checks each bot; busy in any one → 75', () => {
+  const body = `const a=process.argv.slice(2); require('fs').appendFileSync(process.env.HOME + '/calls', a.join(' ') + '\\n'); console.log(a[2]==='cli_b' ? '· 将排队（正在回复，完成后自动挂起）: x' : '· 将挂起: y');`;
+  const { home, r } = runGate(body, 'cli_a cli_b');
+  assert.equal(r.status, 75, r.stderr);
+  assert.equal(readFileSync(join(home, 'calls'), 'utf-8').trim(), 'suspend --bot cli_a --dry-run\nsuspend --bot cli_b --dry-run');
+});
+
+test('pre-refresh gate: botmux that cannot answer is a gate failure, never "idle"', () => {
+  const down = runGate(`console.error('daemon not running'); process.exit(1)`);
+  const partial = runGate(`console.log('· 将挂起: x'); process.exit(2)`); // looks like a dry-run, but failed
+  assert.equal(partial.r.status, 1, 'non-zero dry-run is a failure even with session lines');
+  assert.notEqual(down.r.status, 0);
+  assert.notEqual(down.r.status, 75);
+  const home = tmp();
+  const missing = spawnSync('/bin/bash', [GATE], { encoding: 'utf-8', env: { HOME: home, PATH: `${NODE_DIR}:/usr/bin:/bin`, BOTMUX_CLI: join(home, 'nope.js') } });
+  assert.equal(missing.status, 127);
+});

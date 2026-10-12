@@ -52,6 +52,7 @@ See `examples/config.json`.
 | `claudeBinary` | Binary to audit; the service checks that client_id, endpoints and header are still inside it |
 | `accounts[].credentialPath` | The published credential file |
 | `accounts[].onRefreshed` | Script run after each refresh, see below |
+| `accounts[].preRefresh` | Optional gate run before a due refresh, so it can wait until consumers are idle; see below. `preRefreshTimeoutSec` (default 20), `preRefreshMaxDeferMin` (default 60) |
 | `accounts[].legacyLockDir` | Also hold the legacy cron lock (mkdir + pid) while refreshing this account |
 | `accounts[].label` | Optional display name. Default: the local part (before `@`) of the e-mail the CLI is logged in with, read from the claude config next to the credential file (`~/.claude/…` → `~/.claude.json`, otherwise `<dir>/.claude.json`); the account id if none. Only the local part is ever returned |
 | `alert.script` | Alert delivery script; if unset, no alerts are sent |
@@ -62,7 +63,7 @@ Hot reload happens on SIGHUP or when the config file's mtime changes. It is defe
 
 ## Scripts
 
-Both kinds are executed directly (no shell), each in its own process group. The service's `PATH` is the node binary's directory followed by the system directories. botmux and lark-cli are node scripts, so the examples call them as `"$NODE" <script>`; use absolute paths in your own scripts too.
+All scripts are executed directly (no shell), each in its own process group. The service's `PATH` is the node binary's directory followed by the system directories. botmux and lark-cli are node scripts, so the examples call them as `"$NODE" <script>`; use absolute paths in your own scripts too.
 
 **onRefreshed:**
 
@@ -72,7 +73,18 @@ Both kinds are executed directly (no shell), each in its own process group. The 
 | timeout | `hookTimeoutSec` (default 60) |
 | retry | One retry within that timeout budget; still failing → `hook_failed` (critical) |
 
-**alert:**
+**preRefresh:**
+
+A refresh revokes the old access token at once, so any request in flight with it fails (claude reports `provider_authentication_failed` and may wipe its own copy of the credential). The gate lets a due refresh wait until the account's consumers are idle.
+
+| item | contract |
+|-|-|
+| when | Every tick (1 min) while a refresh is due. Not run for forced CLI refreshes |
+| env | `CK_ACCOUNT` `CK_EVENT=pre_refresh` `CK_CREDENTIAL_PATH` `CK_AT_LEFT_MIN` |
+| exit | `75` = busy, defer to the next tick; `0` = go. Any other exit code, a timeout or a spawn error also goes ahead and records `pre_refresh_failed` (warn): refreshing on time matters more than sparing one turn |
+| limits | Never defers once the AT has `redMin` minutes or less left, nor after `preRefreshMaxDeferMin` minutes of deferring. The deferral clock lives in memory: a restart or a hot reload that rebuilds the account starts it again, so the hard bound is `redMin` |
+| events | `refresh_deferred` (info, once per episode), `refresh_defer_ended` (`reason` = `idle` / `not_due` info; `floor` / `max_defer` / `gate_failed` warn). `/v1/accounts` shows `refreshDeferredSince` |
+
 
 | item | contract |
 |-|-|
@@ -85,6 +97,7 @@ Examples in `examples/`:
 
 - `on-refreshed-botmux-default.sh` — seed per-bot copies and `botmux suspend all` (what the legacy cron script did). Bots with `credentialsSourceDir` in bots.json are skipped. If botmux cannot run (exit 126/127), the hook fails and `hook_failed` is raised; other non-zero exits (inactive sessions) are tolerated as before. Note: the legacy script sent a heartbeat on every run; cred-keeper sends one daily summary (`alert.heartbeat`)
 - `on-refreshed-botmux-account.sh` — `botmux suspend --bot <appId>` for bots with their own account
+- `pre-refresh-botmux.sh` — preRefresh gate: exit 75 while `botmux suspend --dry-run` would queue a session of the account's bots (it is in the middle of a turn). Read-only. A session stuck in "replying" keeps it busy, so `preRefreshMaxDeferMin` is what bounds the wait
 - `alert-lark.sh` — Feishu/Lark DM through `lark-cli`
 
 ## API (GET only)
