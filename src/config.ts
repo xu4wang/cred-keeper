@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { absPath } from './util.ts';
 
 export type Level = 'info' | 'warn' | 'error' | 'critical';
@@ -46,6 +47,41 @@ export interface Config {
   accounts: AccountConfig[];
   alert?: { script: string; timeoutSec: number; minLevel: Level; heartbeat?: string };
   usageThresholds: { fiveHourPct: number; projectedPct: number };
+  /** Optional: share credentials across machines through a central Redis. Absent = single-machine mode. */
+  fleet?: FleetConfig;
+}
+
+export interface MirrorConfig {
+  /** Fleet-wide account name, as some other machine publishes it. */
+  name: string;
+  /** Where the copy is written (botmux bots point `credentialsSourceDir` at its grandparent dir). */
+  credentialPath: string;
+  /** Run after the copy changed (e.g. suspend the bots using it). Same env as onRefreshed. */
+  onUpdated?: string;
+  /** Exit 75 = a bot using this copy is mid-turn; reported to the fleet so the owner defers its refresh. */
+  busyCheck?: string;
+  /** Run once when the copy is about to expire without an update (errorMin). */
+  onStale?: string;
+  hookTimeoutSec: number;
+  /** Copy's AT has fewer minutes left than this and no update arrived → warn. */
+  warnMin: number;
+  /** … fewer than this → error (+ onStale). */
+  errorMin: number;
+}
+
+export interface FleetConfig {
+  /** This machine's name in the fleet (busy reports, event origin). */
+  machine: string;
+  redis: string;
+  redisPasswordFile?: string;
+  keyFile: string;
+  /** Local account id → fleet-wide name to publish it under. */
+  publish: Record<string, string>;
+  mirrors: MirrorConfig[];
+  /** Republish unchanged credentials this often, so a restarted (empty) Redis refills itself. */
+  republishMin: number;
+  /** Lifetime of a busy report; a crashed machine stops blocking refreshes after this. */
+  busyTtlSec: number;
 }
 
 const ID_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
@@ -117,6 +153,7 @@ export function loadConfig(path: string): Config {
     };
   }
   const dataDir = absPath(String(raw.dataDir ?? '~/.cred-keeper'), 'dataDir');
+  const fleet = raw.fleet === undefined || raw.fleet === null ? undefined : parseFleet(raw.fleet, accounts);
   const t = (raw.usageThresholds ?? {}) as Record<string, unknown>;
   return {
     path,
@@ -135,6 +172,62 @@ export function loadConfig(path: string): Config {
       fiveHourPct: num(t.fiveHourPct, 80, 'usageThresholds.fiveHourPct'),
       projectedPct: num(t.projectedPct, 100, 'usageThresholds.projectedPct'),
     },
+    fleet,
+  };
+}
+
+function parseFleet(f: Record<string, any>, accounts: AccountConfig[]): FleetConfig {
+  const machine = String(f.machine ?? '');
+  if (!ID_RE.test(machine)) throw new Error(`fleet.machine must match ${ID_RE}`);
+  const redis = String(f.redis ?? '');
+  if (!/^redis:\/\/[^/]+/.test(redis)) throw new Error('fleet.redis must be a redis:// URL');
+  const names = new Set<string>();
+  const claim = (name: string, field: string): void => {
+    if (!ID_RE.test(name)) throw new Error(`${field} must match ${ID_RE}`);
+    if (names.has(name)) throw new Error(`${field}: fleet name ${name} is used twice`);
+    names.add(name);
+  };
+  const publish: Record<string, string> = {};
+  for (const [id, name] of Object.entries((f.publish ?? {}) as Record<string, unknown>)) {
+    if (!accounts.some((a) => a.id === id)) throw new Error(`fleet.publish.${id}: no such local account`);
+    claim(String(name), `fleet.publish.${id}`);
+    publish[id] = String(name);
+  }
+  const home = homedir();
+  const localPaths = new Set(accounts.map((a) => a.credentialPath));
+  const mirrors: MirrorConfig[] = [];
+  for (const [i, m] of ((f.mirrors ?? []) as Record<string, any>[]).entries()) {
+    const field = `fleet.mirrors[${i}]`;
+    const name = String(m.name ?? '');
+    claim(name, `${field}.name`);
+    const credentialPath = absPath(String(m.credentialPath ?? `~/accounts/${name}/claude/.credentials.json`), `${field}.credentialPath`);
+    if (localPaths.has(credentialPath)) throw new Error(`${field}.credentialPath is a local account's credentialPath`);
+    if (mirrors.some((x) => x.credentialPath === credentialPath)) throw new Error(`${field}.credentialPath is used by another mirror`);
+    // A copy must never land in the CLI's default config dir: that is the machine's own login.
+    if (dirname(credentialPath) === join(home, '.claude')) throw new Error(`${field}.credentialPath must not be in ~/.claude`);
+    const warnMin = num(m.warnMin, 45, `${field}.warnMin`, 1);
+    const errorMin = num(m.errorMin, 20, `${field}.errorMin`, 0);
+    if (errorMin >= warnMin) throw new Error(`${field}: errorMin must be below warnMin`);
+    mirrors.push({
+      name,
+      credentialPath,
+      onUpdated: m.onUpdated ? absPath(String(m.onUpdated), `${field}.onUpdated`) : undefined,
+      busyCheck: m.busyCheck ? absPath(String(m.busyCheck), `${field}.busyCheck`) : undefined,
+      onStale: m.onStale ? absPath(String(m.onStale), `${field}.onStale`) : undefined,
+      hookTimeoutSec: num(m.hookTimeoutSec, 60, `${field}.hookTimeoutSec`, 1),
+      warnMin,
+      errorMin,
+    });
+  }
+  return {
+    machine,
+    redis,
+    redisPasswordFile: f.redisPasswordFile ? absPath(String(f.redisPasswordFile), 'fleet.redisPasswordFile') : undefined,
+    keyFile: absPath(String(f.keyFile ?? '~/.cred-keeper/fleet.key'), 'fleet.keyFile'),
+    publish,
+    mirrors,
+    republishMin: num(f.republishMin, 5, 'fleet.republishMin', 1),
+    busyTtlSec: num(f.busyTtlSec, 150, 'fleet.busyTtlSec', 30),
   };
 }
 

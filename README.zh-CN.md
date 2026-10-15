@@ -107,6 +107,42 @@ npm ci --omit=dev
 - `pre-refresh-botmux.sh` — preRefresh 示例：用 `botmux suspend --dry-run` 判断，只要这些 bot 有会话会被「排队」（正在回复中）就返回 75。只读，不会挂起任何会话。卡在「回复中」的会话会让它一直判忙，这时靠 `preRefreshMaxDeferMin` 兜住等待时长
 - `alert-lark.sh` — 通过 `lark-cli` 发飞书/Lark 私信
 
+## 机队模式（可选）：跨机器共享账号
+
+不配 `fleet` 段时，cred-keeper 就是上面描述的单机模式（fleet 代码都不会加载）。配上后，多台机器通过一个 Redis
+共享账号：任何机器上的使用方（比如 botmux bot）都能用任何一个账号。每台机器仍然只刷新自己的账号。
+
+```json
+"fleet": {
+  "machine": "dev-tian",
+  "redis": "redis://redis.example.lan:6379",
+  "redisPasswordFile": "~/.cred-keeper/fleet-redis.pass",
+  "keyFile": "~/.cred-keeper/fleet.key",
+  "publish": { "default": "tian" },
+  "mirrors": [
+    { "name": "young", "credentialPath": "~/accounts/young/claude/.credentials.json",
+      "onUpdated": "~/.cred-keeper/hooks/fleet-botmux-mirror.sh",
+      "busyCheck": "~/.cred-keeper/hooks/fleet-botmux-mirror.sh",
+      "onStale":   "~/.cred-keeper/hooks/fleet-botmux-mirror.sh" }
+  ]
+}
+```
+
+- **publish**：本机账号 id → 机队统一名。每次刷新后（以及每 `republishMin` 分钟，默认 5）把凭证文件写进 Redis，并在 stream 上广播。
+- **mirrors**：别的机器负责刷新的账号。`credentialPath` 处的副本与凭证文件**逐字节一致**（不改 schema），旁边的
+  `.claude.json` 写入登录的 `oauthAccount`。副本只会被更新的凭证替换，替换后运行 `onUpdated`。使用方指向副本
+  （botmux：`credentialsSourceDir` = 副本的祖父目录，如 `~/accounts/young`）。
+- **查忙**：副本进入所属机器的刷新窗口后运行 `busyCheck`（exit 75 = 有使用方正在回复），所属机器的刷新闸门会据此推迟，
+  规则与本机 `preRefresh` 相同（同样受 `preRefreshMaxDeferMin`/`redMin` 限制）。
+- **新鲜度**：副本 AT 剩余少于 `warnMin`（45）分钟仍未更新 → `mirror_stale`（warn）；少于 `errorMin`（20）→ `mirror_expiring`（error）并运行 `onStale`。
+- **安全**：写进 Redis 的每个值都用机队密钥做 AES-256-GCM 加密，并绑定 key 名，Redis（明文 TCP）看不到任何 token。
+  用 `cred-keeper fleet-keygen <路径>` 生成一次密钥，把这个文件复制到每台机器（0600）。Redis 也要设密码。
+- **故障**：Redis 只是缓存。它挂了不影响本机刷新和 hook（`fleet_unreachable`，每小时最多一次）；副本暂停更新，恢复后自动追平；
+  所属机器读不到查忙结果时不会推迟刷新。
+- `examples/fleet-botmux-mirror.sh` 是 botmux 主机上三个镜像 hook 共用的脚本：它在 `~/.botmux/bots.json` 里找
+  `credentialsSourceDir` 指向这个副本账号目录的 bot。
+- 接口：`GET /v1/fleet`（镜像状态，无密钥）、`POST /v1/fleet/sync`（立即拉取所有镜像；命令行 `cred-keeper fleet-sync`）。
+
 ## 接口（只接受 GET）
 
 | 路径 | 说明 |
