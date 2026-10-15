@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>机队模式（跨机共享账号） · cred-keeper 文档</title>
+<meta name="description" content="cred-keeper：多账号 Claude OAuth 凭证刷新、用量监控与跨机共享。多台机器通过一个 Redis 共享账号：每台只刷新自己的号，bot 可以用任何机器的号。">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <button class="menu-btn" onclick="document.body.classList.toggle('nav-open')" aria-label="目录">☰ 目录</button>
+  <a class="brand" href="index.html">cred<span>-</span>keeper <span style="color:var(--muted);font-weight:500">文档</span></a>
+  <span class="sp"></span>
+  <a class="ext" href="../">🎬 动画讲解</a>
+  <a class="ext" href="https://github.com/xu4wang/cred-keeper">GitHub</a>
+</header>
+<div class="layout">
+<nav class="side">
+<div class="grp">开始</div>
+<a href="index.html">概览</a>
+<a href="quickstart.html">安装与上手</a>
+<div class="grp">核心</div>
+<a href="concepts.html">工作原理</a>
+<a href="config.html">配置参考</a>
+<a href="hooks.html">脚本与钩子</a>
+<div class="grp">机队</div>
+<a href="fleet.html" class="on">机队模式（跨机共享账号）</a>
+<div class="grp">参考</div>
+<a href="api.html">接口与命令行</a>
+<a href="ops.html">运维与排障</a>
+</nav>
+<main>
+<h1>机队模式（跨机共享账号）</h1>
+<p class="lead">多台机器通过一个 Redis 共享账号：每台只刷新自己的号，bot 可以用任何机器的号。</p>
+
+<p>单机模式下，一台机器上的 bot 只能用这台机器上登录的号。机队模式让多台机器通过一个 Redis 共享账号：<strong>每台机器仍只刷新自己的号</strong>，刷新后把凭证加密发布出去；其他机器把需要的号镜像到本地，bot 指向镜像即可。换号只改 bot 的一个配置项，与号在哪台机器刷新无关。</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 880 330" role="img" aria-label="机队模式数据流">
+  <rect class="box hot" x="20" y="30" width="220" height="120" rx="12"/>
+  <text class="t" x="130" y="58" text-anchor="middle">机器 A（生产者）</text>
+  <text class="m" x="130" y="82" text-anchor="middle">cred-keeper 刷新自己的号 tian</text>
+  <text class="m" x="130" y="104" text-anchor="middle">publish: default → tian</text>
+  <text class="m" x="130" y="126" text-anchor="middle">刷新前读 busy，有人忙就推迟</text>
+
+  <rect class="box" x="330" y="90" width="220" height="150" rx="12"/>
+  <text class="t" x="440" y="118" text-anchor="middle">Redis（只是缓存）</text>
+  <text class="m" x="440" y="144" text-anchor="middle">ck:cred:&lt;号&gt;  AES-256-GCM 密文</text>
+  <text class="m" x="440" y="166" text-anchor="middle">ck:events  刷新广播（stream）</text>
+  <text class="m" x="440" y="188" text-anchor="middle">ck:busy:&lt;号&gt;:&lt;机器&gt;  带 TTL</text>
+  <text class="m" x="440" y="214" text-anchor="middle">丢了也没事：5 分钟内重新写满</text>
+
+  <rect class="box cool" x="640" y="30" width="220" height="120" rx="12"/>
+  <text class="t" x="750" y="58" text-anchor="middle">机器 B（使用方）</text>
+  <text class="m" x="750" y="82" text-anchor="middle">mirrors: tian</text>
+  <text class="m" x="750" y="104" text-anchor="middle">~/accounts/tian/ 逐字节副本</text>
+  <text class="m" x="750" y="126" text-anchor="middle">onUpdated → suspend 相关 bot</text>
+
+  <rect class="box cool" x="640" y="200" width="220" height="100" rx="12"/>
+  <text class="t" x="750" y="228" text-anchor="middle">bot（任何机器）</text>
+  <text class="m" x="750" y="252" text-anchor="middle">credentialsSourceDir</text>
+  <text class="m" x="750" y="272" text-anchor="middle">= ~/accounts/tian</text>
+
+  <path class="ln a" d="M240 75 C290 75 290 130 330 130"/>
+  <text class="m" x="250" y="66">① 刷新后发布</text>
+  <path class="ln b" d="M550 130 C600 130 600 75 640 75"/>
+  <text class="m" x="566" y="62">② 广播→拉取</text>
+  <path class="ln b d" d="M640 120 C600 120 600 190 550 190"/>
+  <text class="m" x="565" y="214">③ 报忙</text>
+  <path class="ln a d" d="M330 200 C280 200 280 140 240 140"/>
+  <text class="m" x="232" y="214">④ 刷新前查忙</text>
+  <path class="ln b" d="M750 150 V200"/>
+  <text class="m" x="758" y="180">冷启动复制</text>
+</svg>
+<figcaption>每台机器仍只刷新自己的号；Redis 只负责传递密文和忙碌状态；使用方的 bot 指向本机的镜像目录。</figcaption>
+</figure>
+
+
+<h2>三件事</h2>
+<ul>
+  <li><strong>发布（publish）</strong>：<code>fleet.publish</code> 里列出的本机号，每次刷新后、以及每 <code>republishMin</code> 分钟（默认 5），把凭证文件原样加密写进 <code>ck:cred:&lt;号&gt;</code>，并在 <code>ck:events</code> stream 上广播。</li>
+  <li><strong>镜像（mirrors）</strong>：别的机器负责刷新的号。收到广播立即拉取（另外每分钟兜底同步一次），只有<strong>严格更新</strong>的凭证才会替换本地副本（到期时间相同也不替换），替换在文件锁内完成，然后运行 <code>onUpdated</code>。</li>
+  <li id="busy"><strong>查忙（busy）</strong>：副本进入所属号的刷新窗口（AT 剩不到 180 分钟）后，每分钟运行 <code>busyCheck</code>；退出码 75 表示本机有使用这个号的 bot 正在回复，写入带 TTL 的 <code>ck:busy:&lt;号&gt;:&lt;机器&gt;</code>。所属机器刷新前读取它，有人忙就推迟——规则与本机 <code>preRefresh</code> 完全相同，同样受 <code>preRefreshMaxDeferMin</code> / <code>redMin</code> 限制。</li>
+</ul>
+
+<h2>凭证原样传输</h2>
+<p>镜像副本与生产者的凭证文件<strong>逐字节一致</strong>，不改 schema；登录身份 <code>oauthAccount</code> 写进副本旁边的 <code>.claude.json</code>（该文件的其他字段保留）。所以 Claude Code 以后改凭证格式也不影响机队模式。</p>
+
+<h2 id="config">配置</h2>
+<pre><code>"fleet": {
+  "machine": "dev-prem",
+  "redis": "redis://redis.example.lan:6379",
+  "redisPasswordFile": "~/.cred-keeper/fleet-redis.pass",
+  "keyFile": "~/.cred-keeper/fleet.key",
+  "publish": { "default": "alpha", "acct1": "young" },
+  "mirrors": [
+    { "name": "tian",
+      "credentialPath": "~/accounts/tian/claude/.credentials.json",
+      "onUpdated": "~/.cred-keeper/hooks/fleet-botmux-mirror.sh",
+      "busyCheck": "~/.cred-keeper/hooks/fleet-botmux-mirror.sh",
+      "onStale":   "~/.cred-keeper/hooks/fleet-botmux-mirror.sh" }
+  ]
+}</code></pre>
+<table>
+<tr><th>字段</th><th>默认</th><th>含义</th></tr>
+<tr><td><code>machine</code></td><td>必填</td><td>本机在机队里的名字（忙碌上报、事件来源）</td></tr>
+<tr><td><code>redis</code></td><td>必填</td><td><code>redis://[:密码@]主机[:端口][/库]</code></td></tr>
+<tr><td><code>redisPasswordFile</code></td><td>—</td><td>Redis 密码文件（0600），优先于 URL 里的密码</td></tr>
+<tr><td><code>keyFile</code></td><td><code>~/.cred-keeper/fleet.key</code></td><td>机队密钥：32 字节 base64，<strong>每台机器同一份</strong></td></tr>
+<tr><td><code>publish</code></td><td><code>{{}}</code></td><td>本机账号 id → 机队统一号名</td></tr>
+<tr><td><code>mirrors[].name</code></td><td>必填</td><td>要镜像的机队号名（不能和本机发布的重名）</td></tr>
+<tr><td><code>mirrors[].credentialPath</code></td><td><code>~/accounts/&lt;name&gt;/claude/.credentials.json</code></td><td>副本位置；不能在 <code>~/.claude</code> 里，不能与本机账号重复</td></tr>
+<tr><td><code>mirrors[].onUpdated</code></td><td>—</td><td>副本更新后执行（环境变量同 onRefreshed，<code>CK_EVENT=mirror_updated</code>）</td></tr>
+<tr><td><code>mirrors[].busyCheck</code></td><td>—</td><td><code>CK_EVENT=busy_check</code>；75 = 忙</td></tr>
+<tr><td><code>mirrors[].onStale</code></td><td>—</td><td>副本快过期仍未更新时执行一次（<code>CK_EVENT=mirror_stale</code>）</td></tr>
+<tr><td><code>mirrors[].warnMin</code> / <code>errorMin</code></td><td>45 / 20</td><td>副本 AT 剩余少于此分钟数且未更新 → <code>mirror_stale</code> <span class="lvl warn">warn</span> / <code>mirror_expiring</code> <span class="lvl error">error</span></td></tr>
+<tr><td><code>republishMin</code></td><td>5</td><td>未变化时也定期重写，Redis 重启清空后自动补满</td></tr>
+<tr><td><code>busyTtlSec</code></td><td>150</td><td>忙碌上报的寿命；机器宕机后最多这么久就不再挡刷新</td></tr>
+</table>
+
+<h2>安全</h2>
+<ul>
+  <li>写进 Redis 的每个值（凭证和忙碌上报）都用机队密钥做 <strong>AES-256-GCM</strong> 加密，并把 key 名作为附加认证数据绑定——一个号的密文不能被挪去冒充另一个号。Redis 走明文 TCP 也看不到任何 token。</li>
+  <li>密钥只生成一次：<code>cred-keeper fleet-keygen &lt;路径&gt;</code>（不会覆盖已有文件），把这个文件复制到每台机器（0600）。Redis 另设密码，只监听内网。</li>
+  <li>镜像副本包含 RT（为了不改 schema）。生产者每次刷新都会轮换 RT，副本里的 RT 随即作废；新鲜度检查保证同步中断时提前告警。</li>
+</ul>
+
+<h2>故障语义</h2>
+<table>
+<tr><th>情况</th><th>结果</th></tr>
+<tr><td>Redis 不可达</td><td>本机刷新、本机钩子完全不受影响；记 <code>fleet_unreachable</code>（每小时最多一次）。镜像暂停更新，恢复后自动追平</td></tr>
+<tr><td>读不到忙碌状态</td><td><strong>不推迟</strong>刷新（不能因为 Redis 挂了就一直不刷）</td></tr>
+<tr><td>Redis 重启、数据清空</td><td>生产者 <code>republishMin</code> 内重新写满，无需人工</td></tr>
+<tr><td>某台机器宕机</td><td>它的忙碌上报在 <code>busyTtlSec</code> 后过期，不再挡别人刷新</td></tr>
+<tr><td>密钥不一致 / 被篡改</td><td>解密失败，副本不更新，记 <code>mirror_unreadable</code> <span class="lvl error">error</span></td></tr>
+<tr><td>旧值重放</td><td>只接受到期时间严格更晚的凭证，旧值被忽略</td></tr>
+</table>
+
+<h2>在 botmux 上使用</h2>
+<ol>
+  <li>使用方机器的 <code>fleet.mirrors</code> 加上要用的号，三个钩子都指向 <code>examples/fleet-botmux-mirror.sh</code>（它按 bots.json 自动找 bot，不需要维护名单）。</li>
+  <li>等副本出现：<code>curl 127.0.0.1:8790/v1/fleet</code> 里该镜像的 <code>freshness</code> 为 <code>ok</code>。</li>
+  <li>把 bot 的 <code>credentialsSourceDir</code> 改成副本的账号目录（如 <code>~/accounts/tian</code>），对这个 bot 执行 <code>botmux stop-bot</code> / <code>start-bot</code> 和 <code>botmux suspend --bot</code>。</li>
+  <li>如果这个 bot 原来在别的号的钩子名单里，从名单里去掉。</li>
+  <li>验证：bot 冷启动后，它自己那份凭证的 AT 指纹应与该号一致。</li>
+</ol>
+
+<h2>部署 Redis 的参考配置</h2>
+<pre><code>bind 127.0.0.1 &lt;内网 IP&gt;
+protected-mode yes
+requirepass &lt;随机长密码&gt;
+save ""              # 只是缓存，不需要持久化
+appendonly no
+maxmemory 64mb
+rename-command FLUSHALL ""
+rename-command FLUSHDB ""
+rename-command CONFIG ""
+rename-command DEBUG ""</code></pre>
+
+<h2>回滚</h2>
+<p>删掉 <code>config.json</code> 里的 <code>fleet</code> 段，热加载后立即回到单机模式；把 bot 的 <code>credentialsSourceDir</code> 改回原来的号即可。</p>
+
+<div class="pager"><a href="hooks.html">← 脚本与钩子</a><a href="api.html">接口与命令行 →</a></div>
+<footer>cred-keeper · MIT · 文档对应 <a href="https://github.com/xu4wang/cred-keeper/tree/main">main 分支</a>；英文说明见 <a href="https://github.com/xu4wang/cred-keeper#readme">README</a>。</footer>
+</main>
+</div>
+</body>
+</html>

@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>概览 · cred-keeper 文档</title>
+<meta name="description" content="cred-keeper：多账号 Claude OAuth 凭证刷新、用量监控与跨机共享。多账号 Claude OAuth 凭证的刷新、用量监控，以及跨机器共享。">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <button class="menu-btn" onclick="document.body.classList.toggle('nav-open')" aria-label="目录">☰ 目录</button>
+  <a class="brand" href="index.html">cred<span>-</span>keeper <span style="color:var(--muted);font-weight:500">文档</span></a>
+  <span class="sp"></span>
+  <a class="ext" href="../">🎬 动画讲解</a>
+  <a class="ext" href="https://github.com/xu4wang/cred-keeper">GitHub</a>
+</header>
+<div class="layout">
+<nav class="side">
+<div class="grp">开始</div>
+<a href="index.html" class="on">概览</a>
+<a href="quickstart.html">安装与上手</a>
+<div class="grp">核心</div>
+<a href="concepts.html">工作原理</a>
+<a href="config.html">配置参考</a>
+<a href="hooks.html">脚本与钩子</a>
+<div class="grp">机队</div>
+<a href="fleet.html">机队模式（跨机共享账号）</a>
+<div class="grp">参考</div>
+<a href="api.html">接口与命令行</a>
+<a href="ops.html">运维与排障</a>
+</nav>
+<main>
+<h1>概览</h1>
+<p class="lead">多账号 Claude OAuth 凭证的刷新、用量监控，以及跨机器共享。</p>
+
+<p>cred-keeper 让一台机器上多个 Claude 账号的 OAuth 凭证<strong>一直有效</strong>：到期前自动刷新、监控每个账号的 5 小时 / 7 天用量、对外提供只读 REST 接口。开启<a href="fleet.html">机队模式</a>后，多台机器还能通过一个 Redis 共享账号，任何机器上的使用方都能用任何一个账号。</p>
+
+<p>它独立运行，不认识 botmux 或任何其他使用方。每次刷新后执行该账号配置的脚本，使用方就通过脚本接入。</p>
+
+<div class="cards">
+  <a class="card" href="quickstart.html"><b>安装与上手</b><span>装好、写最小配置、跑起来、装成服务</span></a>
+  <a class="card" href="concepts.html"><b>工作原理</b><span>权威副本、刷新流程、pending 恢复、keychain 闸门</span></a>
+  <a class="card" href="config.html"><b>配置参考</b><span>config.json 每个字段的含义与默认值</span></a>
+  <a class="card" href="hooks.html"><b>脚本与钩子</b><span>onRefreshed / preRefresh / 告警的约定</span></a>
+  <a class="card" href="fleet.html"><b>机队模式</b><span>多台机器通过 Redis 共享账号，bot 可以用任何机器的号</span></a>
+  <a class="card" href="api.html"><b>接口与命令行</b><span>REST 接口、/metrics、CLI 子命令</span></a>
+  <a class="card" href="ops.html"><b>运维与排障</b><span>事件与告警等级、常见问题、回滚</span></a>
+</div>
+
+<h2>它解决什么问题</h2>
+<ul>
+  <li><strong>凭证过期。</strong>Claude 的 access token（AT）约 8 小时过期，refresh token（RT）每次刷新都会轮换。多个进程各自刷新，会互相把对方的 RT 作废。cred-keeper 让<strong>每个账号只有一个刷新者</strong>。</li>
+  <li><strong>刷新打断正在进行的对话。</strong>刷新会立刻作废旧 AT。<code>preRefresh</code> 闸门让刷新等到使用方空闲再做。</li>
+  <li><strong>撞限流才知道。</strong>每个账号的 5h / 7d 用量定时采样、线性外推，快撞了就告警；配套的<a href="api.html#dashboard">用量看板</a>一屏看全机队。</li>
+  <li><strong>账号被机器绑死。</strong>机队模式下，账号在哪台机器刷新与哪台机器上的 bot 使用它无关，换号只改使用方的一个配置项。</li>
+</ul>
+
+<h2>设计原则</h2>
+<ul>
+  <li><strong>秘密不出门。</strong>token 不进命令行参数、环境变量、事件或接口响应，对外只出现 sha256 前 12 位指纹。机队模式下 Redis 里只有密文。</li>
+  <li><strong>不丢唯一的 RT。</strong>刷新响应先原样落盘再解析；任何「可能持有唯一有效 RT」的数据都不会被静默删除。</li>
+  <li><strong>只读接口。</strong>对外只提供 GET（机队模式另有一个不带数据的本机 POST 触发同步）。</li>
+  <li><strong>与使用方解耦。</strong>接入点只有脚本。不配机队段时，机队代码都不会加载。</li>
+</ul>
+
+<div class="pager"><span></span><a href="quickstart.html">安装与上手 →</a></div>
+<footer>cred-keeper · MIT · 文档对应 <a href="https://github.com/xu4wang/cred-keeper/tree/main">main 分支</a>；英文说明见 <a href="https://github.com/xu4wang/cred-keeper#readme">README</a>。</footer>
+</main>
+</div>
+</body>
+</html>

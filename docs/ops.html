@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>运维与排障 · cred-keeper 文档</title>
+<meta name="description" content="cred-keeper：多账号 Claude OAuth 凭证刷新、用量监控与跨机共享。事件与告警等级、常见问题的处理方法、维护注意事项。">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <button class="menu-btn" onclick="document.body.classList.toggle('nav-open')" aria-label="目录">☰ 目录</button>
+  <a class="brand" href="index.html">cred<span>-</span>keeper <span style="color:var(--muted);font-weight:500">文档</span></a>
+  <span class="sp"></span>
+  <a class="ext" href="../">🎬 动画讲解</a>
+  <a class="ext" href="https://github.com/xu4wang/cred-keeper">GitHub</a>
+</header>
+<div class="layout">
+<nav class="side">
+<div class="grp">开始</div>
+<a href="index.html">概览</a>
+<a href="quickstart.html">安装与上手</a>
+<div class="grp">核心</div>
+<a href="concepts.html">工作原理</a>
+<a href="config.html">配置参考</a>
+<a href="hooks.html">脚本与钩子</a>
+<div class="grp">机队</div>
+<a href="fleet.html">机队模式（跨机共享账号）</a>
+<div class="grp">参考</div>
+<a href="api.html">接口与命令行</a>
+<a href="ops.html" class="on">运维与排障</a>
+</nav>
+<main>
+<h1>运维与排障</h1>
+<p class="lead">事件与告警等级、常见问题的处理方法、维护注意事项。</p>
+
+<h2>事件与告警等级</h2>
+<p>所有事件都写进 <code>state.db</code>，可用 <code>/v1/events</code> 查询；达到 <code>alert.minLevel</code> 的才投递给告警脚本。同一问题在一个「事件期」内只告警一次，账号恢复健康后重新计。</p>
+<table>
+<tr><th>事件</th><th>级别</th><th>含义</th></tr>
+<tr><td><code>refreshed</code></td><td><span class="lvl info">info</span></td><td>刷新成功</td></tr><tr><td><code>refresh_retry</code></td><td><span class="lvl warn">warn</span></td><td>网络失败，下个周期重试</td></tr><tr><td><code>refresh_failed</code></td><td><span class="lvl error">error</span></td><td>刷新失败（网络连续失败 / 被拒绝）</td></tr><tr><td><code>rt_dead</code></td><td><span class="lvl critical">critical</span></td><td>RT 失效，需要人工重新登录</td></tr><tr><td><code>rt_expiring</code></td><td><span class="lvl error">error</span></td><td>RT 将在 rtWarnDays 天内到期，需安排人工登录（每天一次）</td></tr><tr><td><code>critical_unknown_response</code></td><td><span class="lvl critical">critical</span></td><td>刷新响应无法识别，RT 可能已在服务端轮换</td></tr><tr><td><code>pending_unresolved</code></td><td><span class="lvl critical">critical</span></td><td>存在无法自动判断的 pending 响应</td></tr><tr><td><code>persist_failed</code></td><td><span class="lvl critical">critical</span></td><td>凭证或 pending 写盘失败（内存里保留，持续重试）</td></tr><tr><td><code>breaker</code></td><td><span class="lvl critical">critical</span></td><td>权威副本与发布文件都不可用</td></tr><tr><td><code>republished</code></td><td><span class="lvl error">error</span></td><td>发布文件异常，已从权威副本重新发布（每小时最多一次）</td></tr><tr><td><code>adopted</code></td><td><span class="lvl warn">warn</span></td><td>发布文件比副本新（多为人工重新登录），已收编</td></tr><tr><td><code>hook_failed</code></td><td><span class="lvl critical">critical</span></td><td>onRefreshed 失败：使用方可能仍持有已吊销的 AT</td></tr><tr><td><code>pre_refresh_failed</code></td><td><span class="lvl warn">warn</span></td><td>preRefresh 脚本失败，照常刷新</td></tr><tr><td><code>refresh_deferred</code></td><td><span class="lvl info">info</span></td><td>使用方正忙，推迟刷新</td></tr><tr><td><code>refresh_defer_ended</code></td><td><span class="lvl info">info</span> <span class="lvl warn">warn</span></td><td>推迟结束；因 floor / max_defer / gate_failed 结束时为 warn</td></tr><tr><td><code>keychain_split</code></td><td><span class="lvl error">error</span></td><td>keychain 里有该凭证的条目，拒绝刷新</td></tr><tr><td><code>keychain_gate_unavailable</code></td><td><span class="lvl error">error</span></td><td>看不到 login keychain，分裂检查失效</td></tr><tr><td><code>legacy_lock_stale</code></td><td><span class="lvl error">error</span> <span class="lvl critical">critical</span></td><td>陈旧的旧 cron 锁卡住刷新，需人工删除</td></tr><tr><td><code>contract_drift</code></td><td><span class="lvl error">error</span></td><td>claude 二进制里找不到预期的 client_id / 接口 / 请求头</td></tr><tr><td><code>usage_high</code></td><td><span class="lvl warn">warn</span></td><td>5 小时窗口用量偏高（利用率或外推值超阈值）</td></tr><tr><td><code>usage_locked</code></td><td><span class="lvl error">error</span></td><td>已被限流锁定</td></tr><tr><td><code>alert_undelivered</code></td><td><span class="lvl error">error</span></td><td>告警脚本重试后仍失败</td></tr><tr><td><code>fleet_unreachable</code></td><td><span class="lvl warn">warn</span></td><td>Redis 不可达，跨机同步暂停（每小时最多一次）</td></tr><tr><td><code>fleet_config_error</code></td><td><span class="lvl error">error</span></td><td>fleet 配置无法启用（如密钥文件缺失），只按单机运行</td></tr><tr><td><code>fleet_published</code></td><td><span class="lvl info">info</span></td><td>本机号已发布到机队（指纹变化时记录）</td></tr><tr><td><code>mirror_updated</code></td><td><span class="lvl info">info</span></td><td>镜像副本已更新</td></tr><tr><td><code>mirror_stale</code></td><td><span class="lvl warn">warn</span></td><td>镜像副本迟迟未更新</td></tr><tr><td><code>mirror_expiring</code></td><td><span class="lvl error">error</span></td><td>镜像副本快过期且未更新，使用它的 bot 将失效</td></tr><tr><td><code>mirror_unreadable</code></td><td><span class="lvl error">error</span></td><td>Redis 里的值解密失败（密钥不一致或被篡改）</td></tr><tr><td><code>mirror_write_failed</code></td><td><span class="lvl error">error</span></td><td>镜像副本写入失败</td></tr><tr><td><code>mirror_hook_failed</code></td><td><span class="lvl critical">critical</span></td><td>镜像钩子（onUpdated / onStale）失败</td></tr><tr><td><code>heartbeat</code></td><td><span class="lvl info">info</span></td><td>每日汇总</td></tr>
+</table>
+
+<h2>常见问题</h2>
+<h3>账号进入 <code>dead</code></h3>
+<p>RT 已失效（过期、被别的进程用掉、或被吊销）。只能在该账号的配置目录里人工 <code>/login</code>；登录后发布文件变新，服务会自动收编并恢复。RT 有固定到期时间（刷新不顺延），<code>rt_expiring</code> 会提前 <code>rtWarnDays</code> 天每天提醒。</p>
+
+<h3>账号进入 <code>critical</code></h3>
+<p>看 <code>/v1/accounts/&lt;id&gt;</code> 的最近事件。若是 <code>pending_unresolved</code>，按提示用 <code>cred-keeper pending &lt;id&gt; apply|discard --confirm &lt;id&gt;</code> 处理；<strong>不确定时不要 discard</strong>，它可能持有唯一有效的 RT。</p>
+
+<h3>刷新后 bot 报认证失败</h3>
+<p>刷新立刻作废旧 AT。检查 <code>hook_ok</code> / <code>hook_failed</code>：钩子没成功 suspend，bot 就还拿着旧 AT。配置 <code>preRefresh</code> 可以避免在 bot 回复中途刷新。</p>
+
+<h3>镜像 <code>freshness</code> 不是 ok</h3>
+<ul>
+  <li><code>missing</code>：还没同步到。查 <code>/v1/fleet</code> 的 <code>lastError</code>（<code>not published</code> = 生产者还没发布；<code>redis: …</code> = 连不上 Redis）。</li>
+  <li><code>warn</code> / <code>error</code>：副本快过期但没收到更新。先看生产者那台的账号状态（是否刷新失败、是否被推迟），再看两边能否连到 Redis。可以 <code>cred-keeper fleet-sync</code> 手动拉一次。</li>
+</ul>
+
+<h3>收不到用量预警</h3>
+<p><code>usage_high</code> 是 warn 级别，默认 <code>minLevel=error</code> 时不投递。调低 <code>minLevel</code>，或者看用量看板。</p>
+
+<h2>维护注意</h2>
+<ul>
+  <li><strong>强制刷新会吊销当前 AT</strong>：<code>refresh --force</code> 之后，所有使用方都必须换上新凭证。</li>
+  <li><strong>不要把凭证文件复制到别处「试一下」</strong>：那就是一次真刷新，会让原主机的 RT 失效。</li>
+  <li>升级后看一眼 <code>/healthz</code> 与 <code>/v1/accounts</code>：指纹不变、状态 ok 即可。</li>
+  <li>机队模式回滚：删掉 <code>fleet</code> 段即可回到单机；无需重启。</li>
+</ul>
+
+<h2>测试</h2>
+<pre><code>npm test                                        # node:test + 假 OAuth 服务器 + 假 Redis，不访问网络
+CK_CLAUDE_BINARY=/path/to/claude.exe npm test   # 另外检查真实二进制里的契约字符串（只读）</code></pre>
+
+<div class="pager"><a href="api.html">← 接口与命令行</a><span></span></div>
+<footer>cred-keeper · MIT · 文档对应 <a href="https://github.com/xu4wang/cred-keeper/tree/main">main 分支</a>；英文说明见 <a href="https://github.com/xu4wang/cred-keeper#readme">README</a>。</footer>
+</main>
+</div>
+</body>
+</html>

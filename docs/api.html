@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>接口与命令行 · cred-keeper 文档</title>
+<meta name="description" content="cred-keeper：多账号 Claude OAuth 凭证刷新、用量监控与跨机共享。只读 REST 接口、Prometheus 指标、用量看板与命令行。">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <button class="menu-btn" onclick="document.body.classList.toggle('nav-open')" aria-label="目录">☰ 目录</button>
+  <a class="brand" href="index.html">cred<span>-</span>keeper <span style="color:var(--muted);font-weight:500">文档</span></a>
+  <span class="sp"></span>
+  <a class="ext" href="../">🎬 动画讲解</a>
+  <a class="ext" href="https://github.com/xu4wang/cred-keeper">GitHub</a>
+</header>
+<div class="layout">
+<nav class="side">
+<div class="grp">开始</div>
+<a href="index.html">概览</a>
+<a href="quickstart.html">安装与上手</a>
+<div class="grp">核心</div>
+<a href="concepts.html">工作原理</a>
+<a href="config.html">配置参考</a>
+<a href="hooks.html">脚本与钩子</a>
+<div class="grp">机队</div>
+<a href="fleet.html">机队模式（跨机共享账号）</a>
+<div class="grp">参考</div>
+<a href="api.html" class="on">接口与命令行</a>
+<a href="ops.html">运维与排障</a>
+</nav>
+<main>
+<h1>接口与命令行</h1>
+<p class="lead">只读 REST 接口、Prometheus 指标、用量看板与命令行。</p>
+
+<h2>REST 接口</h2>
+<p>只监听回环地址。对外暴露请经反向代理，并只放行 GET/HEAD。响应里没有 token，也没有脚本输出。</p>
+<table>
+<tr><th>路径</th><th>说明</th></tr>
+<tr><td><code>GET /healthz</code></td><td>存活、版本、账号列表、是否启用告警、<code>keychainGate</code>、机队摘要（未启用为 <code>null</code>）</td></tr>
+<tr><td><code>GET /v1/accounts</code></td><td>全部账号：<code>label</code> / <code>labelSource</code>、状态、指纹、AT 与 RT 到期、下次刷新、推迟起点、上次刷新、连续失败次数、用量</td></tr>
+<tr><td><code>GET /v1/accounts/{{id}}</code></td><td>单个账号，另带最近 20 条事件</td></tr>
+<tr><td><code>GET /v1/accounts/{{id}}/usage</code></td><td>最新用量快照</td></tr>
+<tr><td><code>GET /v1/accounts/{{id}}/usage/history?since=24h</code></td><td>用量时间序列；<code>since</code> 支持 <code>30m</code> / <code>6h</code> / <code>7d</code> 或 ISO 时间</td></tr>
+<tr><td><code>GET /v1/usage</code></td><td>所有账号的用量</td></tr>
+<tr><td><code>GET /v1/events?account=&amp;type=&amp;since=&amp;limit=</code></td><td>事件日志（只有退出码和耗时，没有脚本输出）</td></tr>
+<tr><td><code>GET /v1/fleet</code></td><td>机队模式：本机发布了哪些号，以及每个镜像的指纹、AT 剩余、来源、最近同步/更新时间、<code>freshness</code></td></tr>
+<tr><td><code>POST /v1/fleet/sync</code></td><td>机队模式：立即拉取所有镜像。请求和响应都不带凭证；只能本机调用</td></tr>
+<tr><td><code>GET /metrics</code></td><td>Prometheus 文本：AT 剩余分钟、RT 剩余天数、连续失败、状态、5h/7d 用量、镜像 AT 剩余</td></tr>
+</table>
+
+<h3>账号状态 <code>state</code></h3>
+<table>
+<tr><th>值</th><th>含义</th></tr>
+<tr><td><code>ok</code></td><td>正常</td></tr>
+<tr><td><code>refreshing</code> / <code>retrying</code></td><td>刷新中 / 网络失败后等待重试</td></tr>
+<tr><td><code>dead</code></td><td>RT 失效（<code>invalid_grant</code>），需要人工重新登录</td></tr>
+<tr><td><code>critical</code></td><td>有无法自动判断的 pending 响应或无法识别的刷新响应，需要人工处理</td></tr>
+<tr><td><code>breaker</code></td><td>权威副本和发布文件都不可用，已熔断</td></tr>
+</table>
+
+<h2 id="dashboard">用量看板</h2>
+<p>仓库 <code>examples/dashboard/</code> 是一个静态页面，展示一个或多个实例的全部账号：状态、5h / 7d 用量（含重置时间与预测）、AT 剩余、RT 到期日，以及 7 天曲线。每分钟自动刷新，只调用上面的 GET 接口。</p>
+<ol>
+  <li>把 <code>index.html</code> 放到 Web 目录，同目录放 <code>sites.json</code>：<code>[{ "key": "&lt;路径段&gt;", "name": "&lt;显示名&gt;" }]</code></li>
+  <li>同域名下把 <code>/api/&lt;key&gt;/</code> 转发到各实例，只放行 GET/HEAD（参考 <code>nginx.example.conf</code>）。服务本身不发 CORS 头。</li>
+</ol>
+
+<h2>命令行</h2>
+<pre><code>cred-keeper serve [--config &lt;path&gt;]
+cred-keeper status [id]
+cred-keeper refresh &lt;id&gt; --force --confirm &lt;id&gt;     # 会轮换 RT，并吊销所有使用方手上的当前 AT
+cred-keeper pending &lt;id&gt; apply|discard --confirm &lt;id&gt; [--replace &lt;副本指纹&gt;]
+cred-keeper doctor                                    # 连通性、凭证文件、keychain 分裂、脚本、契约、旧 cron
+cred-keeper alert-test                                # 发一条测试告警
+cred-keeper keychain-sentinel                         # macOS：创建哨兵条目
+cred-keeper install-service [--load]                  # macOS LaunchDaemon plist / Linux systemd --user
+cred-keeper fleet-keygen &lt;path&gt;                       # 生成机队密钥（不覆盖已有文件）
+cred-keeper fleet-sync                                # 让运行中的服务立即同步所有镜像</code></pre>
+
+<div class="pager"><a href="fleet.html">← 机队模式（跨机共享账号）</a><a href="ops.html">运维与排障 →</a></div>
+<footer>cred-keeper · MIT · 文档对应 <a href="https://github.com/xu4wang/cred-keeper/tree/main">main 分支</a>；英文说明见 <a href="https://github.com/xu4wang/cred-keeper#readme">README</a>。</footer>
+</main>
+</div>
+</body>
+</html>

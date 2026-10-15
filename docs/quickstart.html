@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>安装与上手 · cred-keeper 文档</title>
+<meta name="description" content="cred-keeper：多账号 Claude OAuth 凭证刷新、用量监控与跨机共享。从零装好 cred-keeper，跑起来，再装成开机自启的服务。">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <button class="menu-btn" onclick="document.body.classList.toggle('nav-open')" aria-label="目录">☰ 目录</button>
+  <a class="brand" href="index.html">cred<span>-</span>keeper <span style="color:var(--muted);font-weight:500">文档</span></a>
+  <span class="sp"></span>
+  <a class="ext" href="../">🎬 动画讲解</a>
+  <a class="ext" href="https://github.com/xu4wang/cred-keeper">GitHub</a>
+</header>
+<div class="layout">
+<nav class="side">
+<div class="grp">开始</div>
+<a href="index.html">概览</a>
+<a href="quickstart.html" class="on">安装与上手</a>
+<div class="grp">核心</div>
+<a href="concepts.html">工作原理</a>
+<a href="config.html">配置参考</a>
+<a href="hooks.html">脚本与钩子</a>
+<div class="grp">机队</div>
+<a href="fleet.html">机队模式（跨机共享账号）</a>
+<div class="grp">参考</div>
+<a href="api.html">接口与命令行</a>
+<a href="ops.html">运维与排障</a>
+</nav>
+<main>
+<h1>安装与上手</h1>
+<p class="lead">从零装好 cred-keeper，跑起来，再装成开机自启的服务。</p>
+
+<h2>运行要求</h2>
+<ul>
+  <li>Node.js 24 及以上。直接运行 TypeScript 源码（type stripping），使用内置的 <code>node:sqlite</code>，没有原生模块，也没有构建步骤。</li>
+  <li>macOS 或 Linux。</li>
+</ul>
+
+<h2>安装</h2>
+<pre><code>git clone https://github.com/xu4wang/cred-keeper.git ~/.cred-keeper/app
+cd ~/.cred-keeper/app &amp;&amp; npm ci --omit=dev</code></pre>
+
+<h2>最小配置</h2>
+<p>写 <code>~/.cred-keeper/config.json</code>。下面管理一个账号：本机 claude 默认目录里的凭证。</p>
+<pre><code>{
+  "listen": "127.0.0.1:8790",
+  "dataDir": "~/.cred-keeper",
+  "accounts": [
+    {
+      "id": "default",
+      "credentialPath": "~/.claude/.credentials.json",
+      "onRefreshed": "~/.cred-keeper/hooks/on-refreshed.sh"
+    }
+  ],
+  "alert": { "script": "~/.cred-keeper/hooks/alert.sh", "minLevel": "error", "heartbeat": "09:00" }
+}</code></pre>
+<p>完整示例见仓库 <code>examples/config.json</code>，每个字段的说明见<a href="config.html">配置参考</a>。</p>
+
+<h2>检查与试跑</h2>
+<pre><code>./bin/cred-keeper doctor --config ~/.cred-keeper/config.json   # 连通性、凭证文件、脚本、契约
+./bin/cred-keeper serve  --config ~/.cred-keeper/config.json   # 前台运行
+curl -s 127.0.0.1:8790/v1/accounts                             # 另开终端查看状态</code></pre>
+
+<div class="callout danger"><b>别拿真凭证做实验。</b>复制一份真实凭证去刷新<strong>就是</strong>一次真刷新：它会轮换 RT，并吊销所有持有者手上的 AT。测试接口只用垃圾 refresh token。</div>
+
+<h2>安装为服务（macOS）</h2>
+<p>推荐以 <strong>LaunchDaemon</strong> 运行：属于 system 域，<code>UserName</code> 是你本人，并显式设置 <code>HOME</code>、<code>USER</code>、<code>PATH</code>。开机后即使没人登录也会启动，用户级 LaunchAgent 做不到这一点。</p>
+<pre><code>cred-keeper keychain-sentinel --config …     # 在普通登录会话里执行一次
+cred-keeper install-service --config …       # 生成 &lt;dataDir&gt;/com.cred-keeper.plist，并打印下面的命令
+sudo install -o root -g wheel -m 644 &lt;plist&gt; /Library/LaunchDaemons/com.cred-keeper.plist
+sudo launchctl bootstrap system /Library/LaunchDaemons/com.cred-keeper.plist
+curl -s 127.0.0.1:&lt;port&gt;/healthz              # keychainGate 应为 "active"</code></pre>
+<p>Linux 上 <code>install-service</code> 生成 systemd <code>--user</code> 单元。</p>
+
+<h2>升级</h2>
+<pre><code>cd ~/.cred-keeper/app &amp;&amp; git pull --ff-only &amp;&amp; npm ci --omit=dev
+# 重启服务：LaunchDaemon 直接结束进程，KeepAlive 会拉起；LaunchAgent 用
+launchctl kickstart -k gui/$(id -u)/com.cred-keeper</code></pre>
+<p>配置文件改动不需要重启：mtime 变化或收到 SIGHUP 即热加载（有刷新进行中时推迟到刷新结束）。</p>
+
+<h2>从旧 cron 迁移</h2>
+<ol>
+  <li>选一个刚刷新完的闲时窗口，备份 crontab，删除其中的刷新行和契约审计行。</li>
+  <li>该账号配置 <code>legacyLockDir</code> 指向旧锁，使服务与可能还在跑的旧脚本互斥。</li>
+  <li><code>cred-keeper doctor</code> 确认 cron 行已删除后，<strong>从配置里去掉 <code>legacyLockDir</code></strong>，否则服务在刷新中途被重启留下的旧锁会永远卡住刷新。</li>
+</ol>
+
+<div class="pager"><a href="index.html">← 概览</a><a href="concepts.html">工作原理 →</a></div>
+<footer>cred-keeper · MIT · 文档对应 <a href="https://github.com/xu4wang/cred-keeper/tree/main">main 分支</a>；英文说明见 <a href="https://github.com/xu4wang/cred-keeper#readme">README</a>。</footer>
+</main>
+</div>
+</body>
+</html>

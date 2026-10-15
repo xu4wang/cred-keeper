@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>工作原理 · cred-keeper 文档</title>
+<meta name="description" content="cred-keeper：多账号 Claude OAuth 凭证刷新、用量监控与跨机共享。一次刷新经历了什么，以及 cred-keeper 如何保证不丢唯一的 refresh token。">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <button class="menu-btn" onclick="document.body.classList.toggle('nav-open')" aria-label="目录">☰ 目录</button>
+  <a class="brand" href="index.html">cred<span>-</span>keeper <span style="color:var(--muted);font-weight:500">文档</span></a>
+  <span class="sp"></span>
+  <a class="ext" href="../">🎬 动画讲解</a>
+  <a class="ext" href="https://github.com/xu4wang/cred-keeper">GitHub</a>
+</header>
+<div class="layout">
+<nav class="side">
+<div class="grp">开始</div>
+<a href="index.html">概览</a>
+<a href="quickstart.html">安装与上手</a>
+<div class="grp">核心</div>
+<a href="concepts.html" class="on">工作原理</a>
+<a href="config.html">配置参考</a>
+<a href="hooks.html">脚本与钩子</a>
+<div class="grp">机队</div>
+<a href="fleet.html">机队模式（跨机共享账号）</a>
+<div class="grp">参考</div>
+<a href="api.html">接口与命令行</a>
+<a href="ops.html">运维与排障</a>
+</nav>
+<main>
+<h1>工作原理</h1>
+<p class="lead">一次刷新经历了什么，以及 cred-keeper 如何保证不丢唯一的 refresh token。</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 860 250" role="img" aria-label="刷新流程">
+  <rect class="box" x="10" y="90" width="150" height="70" rx="10"/>
+  <text class="t" x="85" y="120" text-anchor="middle">到期判断</text>
+  <text class="m" x="85" y="142" text-anchor="middle">AT 剩 ≤ marginMin</text>
+  <rect class="box" x="200" y="90" width="150" height="70" rx="10"/>
+  <text class="t" x="275" y="120" text-anchor="middle">preRefresh 闸门</text>
+  <text class="m" x="275" y="142" text-anchor="middle">忙(75) → 推迟</text>
+  <rect class="box hot" x="390" y="90" width="150" height="70" rx="10"/>
+  <text class="t" x="465" y="120" text-anchor="middle">POST /oauth/token</text>
+  <text class="m" x="465" y="142" text-anchor="middle">RT 在此轮换</text>
+  <rect class="box" x="580" y="20" width="270" height="56" rx="10"/>
+  <text class="t" x="715" y="45" text-anchor="middle">① 原始响应落 pending/</text>
+  <text class="m" x="715" y="64" text-anchor="middle">先保存，再解析</text>
+  <rect class="box" x="580" y="97" width="270" height="56" rx="10"/>
+  <text class="t" x="715" y="122" text-anchor="middle">② 写 vault → 发布 credentialPath</text>
+  <text class="m" x="715" y="141" text-anchor="middle">0600 原子 rename + fsync，旧文件留 .prev</text>
+  <rect class="box cool" x="580" y="174" width="270" height="56" rx="10"/>
+  <text class="t" x="715" y="199" text-anchor="middle">③ onRefreshed 脚本</text>
+  <text class="m" x="715" y="218" text-anchor="middle">使用方接入点（如 suspend bot）</text>
+  <path class="ln" d="M160 125 H200"/><path class="ln" d="M350 125 H390"/>
+  <path class="ln a" d="M540 125 C560 125 560 48 580 48"/>
+  <path class="ln a" d="M540 125 H580"/>
+  <path class="ln a" d="M540 125 C560 125 560 202 580 202"/>
+</svg>
+<figcaption>一次刷新：AT 快过期 → 问使用方忙不忙 → 换 token → 先存原始响应、再更新权威副本和发布文件 → 通知使用方。</figcaption>
+</figure>
+
+<h2>权威副本（vault）与发布文件</h2>
+<p>每个账号在 <code>&lt;dataDir&gt;/vault/&lt;id&gt;.json</code>（0600）保存一份权威副本；<code>credentialPath</code> 只是发布给使用方读的那一份。两者每分钟比对一次：</p>
+<ul>
+  <li>发布的文件被清空、损坏、处于登出状态，或者比副本旧 → 从副本<strong>重新发布</strong>（损坏的文件另存为 <code>vault/&lt;id&gt;.quarantine-*.json</code>）。</li>
+  <li>发布的文件比副本新（例如有人重新登录了）→ <strong>收编</strong>为新的副本（被替换的副本另存为 <code>vault/&lt;id&gt;.displaced-*.json</code>）。</li>
+</ul>
+<p>一个凭证文件只能属于一个账号：两个账号配置同一个 <code>credentialPath</code> 会被直接拒绝。</p>
+
+<h2>刷新</h2>
+<p>AT 剩余时间不超过 <code>marginMin</code> 分钟（默认 120，另加 0–5 分钟随机抖动）时刷新。收到 HTTP 200 后，先把原始响应文本原样保存到 <code>&lt;dataDir&gt;/pending/</code>，再解析、更新副本、更新发布文件，最后执行 <code>onRefreshed</code>。</p>
+<ul>
+  <li>pending 写不进去时改写另一个目录里的应急位置；应急位置也失败就留在内存里，每个周期重试写入。新凭证本身照常应用。</li>
+  <li>副本写不进去时，新凭证留在内存里，每分钟重试写入。</li>
+</ul>
+
+<h3>刷新结果</h3>
+<table>
+<tr><th>结果</th><th>处理</th></tr>
+<tr><td>网络失败</td><td>重试；连续第 2 次失败（或 AT 已低于 <code>redMin</code>）时告警 <code>refresh_failed</code></td></tr>
+<tr><td><code>invalid_grant</code></td><td>进入 <code>dead</code>，需要人工重新登录；绝不会用同一个 RT 重试</td></tr>
+<tr><td>格式不对的 400</td><td>告警（很可能是接口契约变了）</td></tr>
+<tr><td>200 但字段不认识</td><td>进入 <code>critical</code>，保留 pending 响应，等人处理</td></tr>
+</table>
+
+<h2>pending 响应绝不静默丢弃</h2>
+<p>服务启动时和每个周期都会检查 pending 响应：</p>
+<ul>
+  <li>它是基于当前副本发出的 → 应用。</li>
+  <li>副本里已经带有它的 AT 或 RT（之前应用过）→ 删除。</li>
+  <li>否则保留，账号进入 <code>critical</code>，同一份 pending 只报告一次。pending 未解决期间<strong>不会发起新的刷新</strong>：它可能持有唯一有效的 RT。</li>
+</ul>
+<p>人工处理：<code>cred-keeper pending &lt;id&gt; apply|discard --confirm &lt;id&gt;</code>。响应不是基于当前副本时，<code>apply</code> 还必须加 <code>--replace &lt;当前副本指纹&gt;</code>。</p>
+
+<h2>锁</h2>
+<p>每个账号一把锁，只在该账号刷新、恢复、对账、补写期间持有。锁里记录持有者 pid 和进程启动时间，持有者崩溃或 pid 被复用都能识别为陈旧锁。<code>status()</code> 只读，不拿锁。</p>
+
+<h2>用量</h2>
+<p>每 <code>usagePollMin</code> 分钟（默认 10）调用一次 <code>GET /api/oauth/usage</code>，保存 5 小时和 7 天两个窗口的利用率与重置时间，并线性外推窗口结束时的用量（<code>projected</code>）。窗口刚开始时外推分母太小，结果只作提前预警参考。</p>
+
+<h2>秘密</h2>
+<ul>
+  <li>token 不出现在命令行参数、环境变量、事件或接口响应里；对外只出现 sha256 前 12 位指纹。</li>
+  <li>脚本的 stdout/stderr 只写 <code>&lt;dataDir&gt;/logs/scripts.log</code>（0600），不经接口返回；写入前把当前 token 与形如 <code>sk-ant-…</code> 的串替换掉。脱敏只是兜底，脚本本身不应打印凭证。</li>
+</ul>
+
+<h2>keychain 分裂闸门（macOS）</h2>
+<p>如果 claude 在 keychain 里有这份凭证的条目（<code>~/.claude</code> 对应 <code>Claude Code-credentials</code>，其他目录对应 <code>Claude Code-credentials-&lt;目录 sha256 前 8 位&gt;</code>），它读的是 keychain 而不是我们刷新的文件。刷新会把 RT 转走、让 keychain 那份失效，所以此时<strong>拒绝刷新并告警</strong> <code>keychain_split</code>。</p>
+<p>LaunchDaemon 不一定看得到 login keychain，因此服务用一个哨兵条目（<code>cred-keeper keychain-sentinel</code> 创建）确认自己的可见性，并在 <code>/healthz</code> 的 <code>keychainGate</code> 报告 <code>active</code> 或 <code>unavailable</code>。只有 <code>active</code> 时闸门才生效；<code>unavailable</code> 期间照常刷新但跳过分裂检查，并持续告警——这是有意的 fail-open，否则开机后无人登录时 AT 会过期。</p>
+<div class="callout danger"><b>测试时绝不能创建不带后缀的 <code>Claude Code-credentials</code> 条目</b>（在共享账号正在使用的机器上），否则所有使用 <code>~/.claude</code> 的使用方都会立刻改读 keychain。</div>
+
+<div class="pager"><a href="quickstart.html">← 安装与上手</a><a href="config.html">配置参考 →</a></div>
+<footer>cred-keeper · MIT · 文档对应 <a href="https://github.com/xu4wang/cred-keeper/tree/main">main 分支</a>；英文说明见 <a href="https://github.com/xu4wang/cred-keeper#readme">README</a>。</footer>
+</main>
+</div>
+</body>
+</html>

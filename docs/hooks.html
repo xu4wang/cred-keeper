@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>脚本与钩子 · cred-keeper 文档</title>
+<meta name="description" content="cred-keeper：多账号 Claude OAuth 凭证刷新、用量监控与跨机共享。cred-keeper 与使用方之间唯一的接入点：三类脚本的调用约定。">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <button class="menu-btn" onclick="document.body.classList.toggle('nav-open')" aria-label="目录">☰ 目录</button>
+  <a class="brand" href="index.html">cred<span>-</span>keeper <span style="color:var(--muted);font-weight:500">文档</span></a>
+  <span class="sp"></span>
+  <a class="ext" href="../">🎬 动画讲解</a>
+  <a class="ext" href="https://github.com/xu4wang/cred-keeper">GitHub</a>
+</header>
+<div class="layout">
+<nav class="side">
+<div class="grp">开始</div>
+<a href="index.html">概览</a>
+<a href="quickstart.html">安装与上手</a>
+<div class="grp">核心</div>
+<a href="concepts.html">工作原理</a>
+<a href="config.html">配置参考</a>
+<a href="hooks.html" class="on">脚本与钩子</a>
+<div class="grp">机队</div>
+<a href="fleet.html">机队模式（跨机共享账号）</a>
+<div class="grp">参考</div>
+<a href="api.html">接口与命令行</a>
+<a href="ops.html">运维与排障</a>
+</nav>
+<main>
+<h1>脚本与钩子</h1>
+<p class="lead">cred-keeper 与使用方之间唯一的接入点：三类脚本的调用约定。</p>
+
+<p>脚本是 cred-keeper 与使用方之间唯一的接入点。所有脚本都<strong>直接执行</strong>（不经 shell），各自运行在独立进程组里，超时整组结束。服务的 <code>PATH</code> 只有 node 所在目录加系统目录，所以脚本里请用绝对路径；botmux、lark-cli 这类 node 脚本用 <code>"$NODE" &lt;脚本&gt;</code> 调用。环境变量里<strong>从不传 token</strong>，需要时自己读文件。</p>
+
+<h2 id="onrefreshed">onRefreshed</h2>
+<table>
+<tr><th>项目</th><th>约定</th></tr>
+<tr><td>何时执行</td><td>每次成功刷新（或恢复 pending）并写好文件之后</td></tr>
+<tr><td>环境变量</td><td><code>CK_ACCOUNT</code> <code>CK_EVENT=refreshed</code> <code>CK_CREDENTIAL_PATH</code> <code>CK_FINGERPRINT</code> <code>CK_AT_EXPIRES_AT</code> <code>CK_RT_EXPIRES_AT</code></td></tr>
+<tr><td>超时 / 重试</td><td><code>hookTimeoutSec</code>（默认 60 秒）内重试 1 次；仍失败发 <code>hook_failed</code> <span class="lvl critical">critical</span></td></tr>
+<tr><td>典型用途</td><td>让使用方换上新凭证：例如 <code>botmux suspend --bot &lt;appId&gt;</code>，下一条消息冷启动时复制新凭证</td></tr>
+</table>
+
+<h2 id="prerefresh">preRefresh</h2>
+<p>刷新会立刻作废旧 AT，正在用它的请求都会失败（claude 报 <code>provider_authentication_failed</code>，还可能把它自己那份凭证清空）。这个脚本让到期的刷新等到使用方空闲再做。</p>
+<table>
+<tr><th>项目</th><th>约定</th></tr>
+<tr><td>何时执行</td><td>到期待刷新期间，每次巡检（1 分钟）一次。CLI 强制刷新不执行</td></tr>
+<tr><td>环境变量</td><td><code>CK_ACCOUNT</code> <code>CK_EVENT=pre_refresh</code> <code>CK_CREDENTIAL_PATH</code> <code>CK_AT_LEFT_MIN</code></td></tr>
+<tr><td>退出码</td><td><code>75</code> = 忙，推迟到下次巡检；<code>0</code> = 可以刷新；其他退出码 / 超时 / 起不来 → 照常刷新并记 <code>pre_refresh_failed</code> <span class="lvl warn">warn</span>：按时刷新比保住一轮对话更重要</td></tr>
+<tr><td>上限</td><td>AT 剩余 ≤ <code>redMin</code> 时不再推迟；连续推迟满 <code>preRefreshMaxDeferMin</code> 也不再推迟。推迟计时只在内存里，重启会重新计时，真正的硬上限是 <code>redMin</code></td></tr>
+<tr><td>事件</td><td><code>refresh_deferred</code>（每次推迟只记一次）、<code>refresh_defer_ended</code>（<code>reason</code>：<code>idle</code> / <code>not_due</code> 为 info，<code>floor</code> / <code>max_defer</code> / <code>gate_failed</code> 为 warn）</td></tr>
+</table>
+<p>机队模式下，同一道闸门还会询问<strong>其他机器</strong>上使用这个号的 bot 是否在忙，规则与上限完全相同，见<a href="fleet.html#busy">机队模式 · 查忙</a>。</p>
+
+<h2 id="alert">告警脚本</h2>
+<table>
+<tr><th>项目</th><th>约定</th></tr>
+<tr><td>环境变量</td><td><code>CK_EVENT</code> <code>CK_LEVEL</code> <code>CK_ACCOUNT</code> <code>CK_TITLE</code> <code>CK_DEDUP_KEY</code></td></tr>
+<tr><td>标准输入</td><td>事件的 JSON</td></tr>
+<tr><td>重试</td><td>按退避重试 3 次；之后仍失败，记 <code>alert_undelivered</code></td></tr>
+<tr><td>去重</td><td>由核心负责（同一问题一个「事件期」只告一次，恢复后重新计），脚本不用处理</td></tr>
+</table>
+
+<h2>仓库里的示例（<code>examples/</code>）</h2>
+<table>
+<tr><th>脚本</th><th>用途</th></tr>
+<tr><td><code>on-refreshed-botmux-default.sh</code></td><td>共享默认账号：播种各 bot 的凭证副本，然后 <code>botmux suspend all</code>。配了 <code>credentialsSourceDir</code> 的 bot 会被跳过</td></tr>
+<tr><td><code>on-refreshed-botmux-account.sh</code></td><td>独立账号：对列出的 bot 执行 <code>botmux suspend --bot &lt;appId&gt;</code></td></tr>
+<tr><td><code>pre-refresh-botmux.sh</code></td><td>用 <code>botmux suspend --dry-run</code> 判断：有会话会被「排队」（正在回复）就返回 75。只读</td></tr>
+<tr><td><code>fleet-botmux-mirror.sh</code></td><td>机队镜像的三个钩子共用：按 bots.json 里的 <code>credentialsSourceDir</code> 自动找到使用该号的 bot</td></tr>
+<tr><td><code>alert-lark.sh</code></td><td>通过 <code>lark-cli</code> 发飞书私信</td></tr>
+</table>
+
+<div class="pager"><a href="config.html">← 配置参考</a><a href="fleet.html">机队模式（跨机共享账号） →</a></div>
+<footer>cred-keeper · MIT · 文档对应 <a href="https://github.com/xu4wang/cred-keeper/tree/main">main 分支</a>；英文说明见 <a href="https://github.com/xu4wang/cred-keeper#readme">README</a>。</footer>
+</main>
+</div>
+</body>
+</html>

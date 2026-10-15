@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>配置参考 · cred-keeper 文档</title>
+<meta name="description" content="cred-keeper：多账号 Claude OAuth 凭证刷新、用量监控与跨机共享。config.json 的全部字段、默认值与示例。">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <button class="menu-btn" onclick="document.body.classList.toggle('nav-open')" aria-label="目录">☰ 目录</button>
+  <a class="brand" href="index.html">cred<span>-</span>keeper <span style="color:var(--muted);font-weight:500">文档</span></a>
+  <span class="sp"></span>
+  <a class="ext" href="../">🎬 动画讲解</a>
+  <a class="ext" href="https://github.com/xu4wang/cred-keeper">GitHub</a>
+</header>
+<div class="layout">
+<nav class="side">
+<div class="grp">开始</div>
+<a href="index.html">概览</a>
+<a href="quickstart.html">安装与上手</a>
+<div class="grp">核心</div>
+<a href="concepts.html">工作原理</a>
+<a href="config.html" class="on">配置参考</a>
+<a href="hooks.html">脚本与钩子</a>
+<div class="grp">机队</div>
+<a href="fleet.html">机队模式（跨机共享账号）</a>
+<div class="grp">参考</div>
+<a href="api.html">接口与命令行</a>
+<a href="ops.html">运维与排障</a>
+</nav>
+<main>
+<h1>配置参考</h1>
+<p class="lead">config.json 的全部字段、默认值与示例。</p>
+
+<p>配置文件默认在 <code>~/.cred-keeper/config.json</code>（命令行 <code>--config</code> 可改）。路径字段都必须是绝对路径或以 <code>~/</code> 开头。修改后自动热加载。</p>
+
+<h2>顶层</h2>
+<table>
+<tr><th>字段</th><th>默认</th><th>含义</th></tr>
+<tr><td><code>listen</code></td><td><code>127.0.0.1:8790</code></td><td>只允许回环地址；对外访问请经反向代理（如 nginx，只放行 GET/HEAD）</td></tr>
+<tr><td><code>dataDir</code></td><td><code>~/.cred-keeper</code></td><td>vault、pending、锁、state.db、日志所在目录</td></tr>
+<tr><td><code>network.proxy</code></td><td>—</td><td>可选的 HTTP 代理；服务<strong>不读</strong> <code>*_proxy</code> 环境变量</td></tr>
+<tr><td><code>claudeBinary</code></td><td>—</td><td>要审计的 claude 二进制：每小时检查其中 client_id、接口路径、请求头是否还在，漂移则告警 <code>contract_drift</code></td></tr>
+<tr><td><code>defaults.marginMin</code></td><td>120</td><td>AT 剩余少于这么多分钟就刷新</td></tr>
+<tr><td><code>defaults.redMin</code></td><td>30</td><td>AT 剩余少于这么多分钟：不再推迟刷新，失败告警升级</td></tr>
+<tr><td><code>defaults.rtWarnDays</code></td><td>7</td><td>RT 剩余天数低于此值每天告警一次（RT 到期只能人工登录）</td></tr>
+<tr><td><code>defaults.usagePollMin</code></td><td>10</td><td>用量采样间隔（分钟）</td></tr>
+<tr><td><code>usageThresholds.fiveHourPct</code></td><td>80</td><td>5 小时窗口利用率 ≥ 此值告警 <code>usage_high</code></td></tr>
+<tr><td><code>usageThresholds.projectedPct</code></td><td>100</td><td>5 小时窗口外推值 ≥ 此值告警 <code>usage_high</code></td></tr>
+<tr><td><code>alert.script</code></td><td>—</td><td>告警投递脚本；不配置就不发告警</td></tr>
+<tr><td><code>alert.minLevel</code></td><td><code>error</code></td><td><code>info</code> / <code>warn</code> / <code>error</code> / <code>critical</code>；低于此级别的事件只记录不投递</td></tr>
+<tr><td><code>alert.heartbeat</code></td><td>—</td><td>每日汇总时间 <code>HH:MM</code>；不配置就不发心跳</td></tr>
+<tr><td><code>alert.timeoutSec</code></td><td>30</td><td>告警脚本超时</td></tr>
+<tr><td><code>fleet</code></td><td>—</td><td>机队模式，见<a href='fleet.html#config'>机队模式</a>。不配置 = 单机模式</td></tr>
+</table>
+<div class="callout warn"><b>注意</b> <code>usage_high</code> 是 warn 级别。<code>alert.minLevel</code> 保持默认 <code>error</code> 时，它只会记录在事件里，不会推送。想收到用量预警，就把 <code>minLevel</code> 调到 <code>warn</code>，或者用看板查看。</div>
+
+<h2>accounts[]</h2>
+<table>
+<tr><th>字段</th><th>默认</th><th>含义</th></tr>
+<tr><td><code>id</code></td><td>必填</td><td><code>[a-z0-9][a-z0-9_-]{{0,31}}</code>，本机唯一</td></tr>
+<tr><td><code>credentialPath</code></td><td>必填</td><td>发布的凭证文件（使用方读的那份），不能与其他账号重复</td></tr>
+<tr><td><code>label</code></td><td>登录邮箱 @ 前部分</td><td>显示名。不配置时从凭证旁的 claude 配置里读登录邮箱（<code>~/.claude/…</code> 对应 <code>~/.claude.json</code>，其他目录对应 <code>&lt;目录&gt;/.claude.json</code>），取不到就用 id</td></tr>
+<tr><td><code>onRefreshed</code></td><td>—</td><td>每次刷新后执行的脚本，见<a href='hooks.html'>脚本与钩子</a></td></tr>
+<tr><td><code>hookTimeoutSec</code></td><td>60</td><td>onRefreshed 超时（含 1 次重试）</td></tr>
+<tr><td><code>preRefresh</code></td><td>—</td><td>到期后先问使用方忙不忙，exit 75 = 忙、推迟</td></tr>
+<tr><td><code>preRefreshTimeoutSec</code></td><td>20</td><td>preRefresh 超时</td></tr>
+<tr><td><code>preRefreshMaxDeferMin</code></td><td>60</td><td>一次推迟最长持续多久；0 = 不推迟</td></tr>
+<tr><td><code>marginMin</code> / <code>redMin</code> / <code>rtWarnDays</code> / <code>usagePollMin</code></td><td>取 defaults</td><td>按账号覆盖</td></tr>
+<tr><td><code>legacyLockDir</code></td><td>—</td><td>迁移期专用：刷新时同时持有旧 cron 的锁（mkdir + pid）。迁移完必须去掉</td></tr>
+</table>
+
+<h2>完整示例</h2>
+<pre><code>{
+  "listen": "127.0.0.1:8790",
+  "dataDir": "~/.cred-keeper",
+  "defaults": { "marginMin": 120, "redMin": 30, "rtWarnDays": 7, "usagePollMin": 10 },
+  "claudeBinary": "~/.local/node-v24/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
+  "accounts": [
+    {
+      "id": "default",
+      "credentialPath": "~/.claude/.credentials.json",
+      "onRefreshed": "~/.cred-keeper/hooks/on-refreshed-botmux-default.sh",
+      "preRefresh": "~/.cred-keeper/hooks/pre-refresh-botmux.sh"
+    },
+    {
+      "id": "acct1",
+      "credentialPath": "~/accounts/acct1/claude/.credentials.json",
+      "onRefreshed": "~/.cred-keeper/hooks/on-refreshed-acct1.sh",
+      "preRefresh": "~/.cred-keeper/hooks/pre-refresh-acct1.sh"
+    }
+  ],
+  "alert": { "script": "~/.cred-keeper/hooks/alert-lark.sh", "minLevel": "error", "heartbeat": "09:00" }
+}</code></pre>
+
+<div class="pager"><a href="concepts.html">← 工作原理</a><a href="hooks.html">脚本与钩子 →</a></div>
+<footer>cred-keeper · MIT · 文档对应 <a href="https://github.com/xu4wang/cred-keeper/tree/main">main 分支</a>；英文说明见 <a href="https://github.com/xu4wang/cred-keeper#readme">README</a>。</footer>
+</main>
+</div>
+</body>
+</html>
