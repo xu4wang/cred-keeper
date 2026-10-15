@@ -2,7 +2,7 @@
 
 [English](README.md) | **简体中文**
 
-🎬 **项目主页（动画讲解）：** https://xu4wang.github.io/cred-keeper/
+🎬 **项目主页（动画讲解）：** https://xu4wang.github.io/cred-keeper/ · 📖 **文档站：** https://xu4wang.github.io/cred-keeper/docs/
 
 让本机多个 Claude 账号的 OAuth 凭证保持有效，监控各账号的用量，并对外提供**只读**的 REST 接口。它独立运行，不认识 botmux 或任何其他消费者。每次刷新后会执行该账号配置的脚本，消费者（botmux、其他 agent 框架）就通过这个脚本接入。
 

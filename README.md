@@ -2,7 +2,7 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-🎬 **Project homepage (animated explainer):** https://xu4wang.github.io/cred-keeper/
+🎬 **Project homepage (animated explainer):** https://xu4wang.github.io/cred-keeper/ · 📖 **Docs (Chinese):** https://xu4wang.github.io/cred-keeper/docs/
 
 Keeps the OAuth credentials of several local Claude accounts fresh, watches their usage, and exposes a **read-only** REST API. Standalone: it knows nothing about botmux or any other consumer. After a refresh it runs a per-account script, and consumers (botmux, other agent frameworks) plug in through that script.
 
