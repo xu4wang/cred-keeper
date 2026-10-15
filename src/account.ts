@@ -319,6 +319,10 @@ export class Account {
   /** Injectable for tests; production uses the real `security` lookups. */
   keychainProbe: (service: string) => boolean | null = keychainItemExists;
   gateProbe: () => GateState = probeKeychainGate;
+  /** Fleet mode: are consumers on other machines mid-turn? null = could not tell (does not defer). */
+  remoteBusy?: () => Promise<{ busy: boolean; machines: string[] } | null>;
+  /** Fleet mode: called after a new credential was applied (publishes it). Must not throw. */
+  onApplied?: () => void;
   /** Outcome of the previous refresh request (to annotate an invalid_grant that follows a network failure). */
   private lastOutcome: string | null = null;
   /** base/vault pair observed under the lock by the last `base_mismatch`. */
@@ -368,6 +372,7 @@ export class Account {
     this.emit(this.cfg.id, how, how === 'refreshed' ? 'info' : 'warn', { fingerprint: fp, rotatedRt });
     if (hadFailures) this.emit(this.cfg.id, 'recovered', 'info', { from: 'refresh_failed' });
     await this.runHook(cred.ok ? cred.cred : null);
+    if (this.onApplied) { try { this.onApplied(); } catch { /* fleet publishing never fails a refresh */ } }
   }
 
   private async runHook(cred: OauthCred | null): Promise<void> {
@@ -415,7 +420,7 @@ export class Account {
   async shouldDefer(cur: OauthCred): Promise<boolean> {
     const end = (reason: string): false => { this.endDeferral(reason, cur); return false; };
     // Removed by a hot reload, or a zero budget: no gate.
-    if (!this.cfg.preRefresh || this.cfg.preRefreshMaxDeferMin <= 0) return end('gate_removed');
+    if ((!this.cfg.preRefresh && !this.remoteBusy) || this.cfg.preRefreshMaxDeferMin <= 0) return end('gate_removed');
     const now = this.now();
     const leftMs = cur.expiresAt - now;
     // Checked before and again after the script: a slow gate must not carry a
@@ -428,26 +433,38 @@ export class Account {
     };
     const before = limit(now);
     if (before) return end(before);
-    const r = await runScript({
-      script: this.cfg.preRefresh,
-      env: { CK_ACCOUNT: this.cfg.id, CK_EVENT: 'pre_refresh', CK_CREDENTIAL_PATH: this.cfg.credentialPath,
-        CK_AT_LEFT_MIN: String(Math.round(leftMs / 60_000)) },
-      timeoutMs: this.cfg.preRefreshTimeoutSec * 1000, logDir: this.p.logDir, label: `preRefresh:${this.cfg.id}`,
-    });
-    if (r.code === 75 && !r.timedOut && !r.error) {
+    let busy = false;
+    let localFailed = false;
+    let machines: string[] | undefined;
+    if (this.cfg.preRefresh) {
+      const r = await runScript({
+        script: this.cfg.preRefresh,
+        env: { CK_ACCOUNT: this.cfg.id, CK_EVENT: 'pre_refresh', CK_CREDENTIAL_PATH: this.cfg.credentialPath,
+          CK_AT_LEFT_MIN: String(Math.round(leftMs / 60_000)) },
+        timeoutMs: this.cfg.preRefreshTimeoutSec * 1000, logDir: this.p.logDir, label: `preRefresh:${this.cfg.id}`,
+      });
+      if (r.code === 75 && !r.timedOut && !r.error) busy = true;
+      else if (!succeeded(r)) {
+        localFailed = true;
+        this.emit(this.cfg.id, 'pre_refresh_failed', 'warn', { code: r.code, signal: r.signal, timedOut: r.timedOut, ms: r.ms, error: r.error });
+      }
+    }
+    if (!busy && this.remoteBusy) {
+      const rb = await this.remoteBusy(); // null (fleet unreachable) never defers
+      if (rb?.busy) { busy = true; machines = rb.machines; }
+    }
+    if (busy) {
       const after = limit(this.now());
       if (after) return end(after);
       if (this.deferredSince === null) {
         this.deferredSince = now;
-        this.emit(this.cfg.id, 'refresh_deferred', 'info', { leftMin: Math.round(leftMs / 60_000), maxDeferMin: this.cfg.preRefreshMaxDeferMin });
+        this.emit(this.cfg.id, 'refresh_deferred', 'info', {
+          leftMin: Math.round(leftMs / 60_000), maxDeferMin: this.cfg.preRefreshMaxDeferMin, ...(machines ? { machines } : {}),
+        });
       }
       return true;
     }
-    if (!succeeded(r)) {
-      this.emit(this.cfg.id, 'pre_refresh_failed', 'warn', { code: r.code, signal: r.signal, timedOut: r.timedOut, ms: r.ms, error: r.error });
-      return end('gate_failed');
-    }
-    return end('idle');
+    return end(localFailed ? 'gate_failed' : 'idle');
   }
 
   /** Close a deferral episode (if one is open) with the reason it ended. */

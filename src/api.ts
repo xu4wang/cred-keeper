@@ -22,12 +22,21 @@ function sinceParam(v: string | null, def: string): string {
 }
 
 export function handle(svc: Service, req: IncomingMessage, res: ServerResponse): void {
-  if (req.method !== 'GET') { send(res, 405, { error: 'read-only API: GET only' }); return; }
   const url = new URL(req.url ?? '/', 'http://localhost');
+  // The one write: ask the fleet to pull every mirror now. Carries no data in either direction
+  // (the reply is only the mirrors' status), so it needs no secret; the listen address is loopback.
+  if (req.method === 'POST' && url.pathname === '/v1/fleet/sync') {
+    if (!svc.fleet) { send(res, 409, { error: 'fleet mode is not configured' }); return; }
+    const f = svc.fleet;
+    void f.syncAll().then(() => send(res, 200, f.status()), (e: Error) => send(res, 500, { error: e.message }));
+    return;
+  }
+  if (req.method !== 'GET') { send(res, 405, { error: 'read-only API: GET only (plus POST /v1/fleet/sync)' }); return; }
   const parts = url.pathname.split('/').filter(Boolean);
   try {
     if (url.pathname === '/healthz') {
-      send(res, 200, { ok: true, version: VERSION, config: svc.configPath, accounts: [...svc.accounts.keys()], alerts: svc.alerter.enabled, keychainGate: svc.keychainGate });
+      send(res, 200, { ok: true, version: VERSION, config: svc.configPath, accounts: [...svc.accounts.keys()], alerts: svc.alerter.enabled, keychainGate: svc.keychainGate,
+        fleet: svc.fleet ? { machine: svc.fleet.cfg.machine, publish: svc.fleet.cfg.publish, mirrors: svc.fleet.cfg.mirrors.map((m) => m.name) } : null });
       return;
     }
     if (parts[0] === 'v1' && parts[1] === 'accounts') {
@@ -46,6 +55,10 @@ export function handle(svc: Service, req: IncomingMessage, res: ServerResponse):
         send(res, 200, svc.store.usageHistory(a.cfg.id, sinceParam(url.searchParams.get('since'), '24h')));
         return;
       }
+    }
+    if (url.pathname === '/v1/fleet') {
+      send(res, svc.fleet ? 200 : 404, svc.fleet ? svc.fleet.status() : { error: 'fleet mode is not configured' });
+      return;
     }
     if (url.pathname === '/v1/usage') {
       send(res, 200, Object.fromEntries([...svc.accounts.keys()].map((id) => [id, svc.usage.get(id) ?? null])));
@@ -71,6 +84,9 @@ export function handle(svc: Service, req: IncomingMessage, res: ServerResponse):
         const u = svc.usage.get(s.id);
         if (u?.fiveHour.utilization != null) lines.push(`credkeeper_usage_five_hour_pct{${l}} ${u.fiveHour.utilization}`);
         if (u?.sevenDay.utilization != null) lines.push(`credkeeper_usage_seven_day_pct{${l}} ${u.sevenDay.utilization}`);
+      }
+      for (const m of svc.fleet?.status().mirrors ?? []) {
+        if (m.accessToken.leftMin !== null) lines.push(`credkeeper_mirror_access_token_left_minutes{mirror="${m.name}"} ${m.accessToken.leftMin}`);
       }
       res.writeHead(200, { 'content-type': 'text/plain; version=0.0.4' });
       res.end(lines.join('\n') + '\n');

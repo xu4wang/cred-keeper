@@ -100,6 +100,47 @@ Examples in `examples/`:
 - `pre-refresh-botmux.sh` — preRefresh gate: exit 75 while `botmux suspend --dry-run` would queue a session of the account's bots (it is in the middle of a turn). Read-only. A session stuck in "replying" keeps it busy, so `preRefreshMaxDeferMin` is what bounds the wait
 - `alert-lark.sh` — Feishu/Lark DM through `lark-cli`
 
+## Fleet mode (optional): share accounts across machines
+
+Without a `fleet` section cred-keeper is single-machine, exactly as above (the fleet code is not even loaded).
+With it, several machines share their accounts through one Redis, so a consumer (e.g. a botmux bot) on any
+machine can use any account. Each machine still refreshes only its own accounts.
+
+```json
+"fleet": {
+  "machine": "dev-tian",
+  "redis": "redis://redis.example.lan:6379",
+  "redisPasswordFile": "~/.cred-keeper/fleet-redis.pass",
+  "keyFile": "~/.cred-keeper/fleet.key",
+  "publish": { "default": "tian" },
+  "mirrors": [
+    { "name": "young", "credentialPath": "~/accounts/young/claude/.credentials.json",
+      "onUpdated": "~/.cred-keeper/hooks/fleet-botmux-mirror.sh",
+      "busyCheck": "~/.cred-keeper/hooks/fleet-botmux-mirror.sh",
+      "onStale":   "~/.cred-keeper/hooks/fleet-botmux-mirror.sh" }
+  ]
+}
+```
+
+- **publish** — local account id → fleet-wide name. After every refresh (and every `republishMin`, default 5)
+  the credential file is written to Redis and announced on a stream.
+- **mirrors** — accounts other machines refresh. The copy at `credentialPath` is the credential file **byte for
+  byte** (no schema change), plus the login's `oauthAccount` in the `.claude.json` next to it. A copy is only ever
+  replaced by a newer one; then `onUpdated` runs. Consumers point at the copy (botmux: `credentialsSourceDir`
+  = the copy's grandparent, e.g. `~/accounts/young`).
+- **busy** — `busyCheck` (exit 75 = a consumer is mid-turn) runs while the copy is in its owner's refresh window;
+  the owner's refresh gate defers on it, exactly like a local `preRefresh`, within the same `preRefreshMaxDeferMin`/`redMin` limits.
+- **freshness** — a copy with fewer than `warnMin` (45) minutes left and no update → `mirror_stale` (warn);
+  fewer than `errorMin` (20) → `mirror_expiring` (error) and `onStale` runs.
+- **security** — every value in Redis is AES-256-GCM sealed with the fleet key and bound to its key name, so Redis
+  (plain TCP) never sees a token. Create the key once with `cred-keeper fleet-keygen <path>` and copy that file to
+  every machine (0600). Use a Redis password too.
+- **failure** — Redis is a cache: if it is down, local refreshes and hooks are unaffected (`fleet_unreachable`, hourly);
+  copies stop updating until it is back; the owner's gate does not wait for busy reports it cannot read.
+- `examples/fleet-botmux-mirror.sh` is one script for all three mirror hooks on a botmux host: it finds the bots
+  whose `credentialsSourceDir` is the copy's account dir in `~/.botmux/bots.json`.
+- API: `GET /v1/fleet` (mirror status, no secrets), `POST /v1/fleet/sync` (pull every mirror now; also `cred-keeper fleet-sync`).
+
 ## API (GET only)
 
 | path | |

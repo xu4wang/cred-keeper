@@ -7,7 +7,8 @@ import { loadConfig, paths, type Config, type Level } from './config.ts';
 import { fetchUsage, Http, project, type UsageSnapshot } from './oauth.ts';
 import { Store } from './store.ts';
 import { nextProbeSeq, probeKeychainGate, type GateState } from './keychain.ts';
-import { ensureDir0700, nowIso } from './util.ts';
+import { ensureDir0700, nowIso, readFileNoFollow } from './util.ts';
+import type { Fleet } from './fleet/fleet.ts';
 
 const FIVE_H = 5 * 3600_000;
 const SEVEN_D = 7 * 86_400_000;
@@ -38,6 +39,13 @@ function title(type: string, account: string | null, data: Record<string, unknow
     case 'refresh_defer_ended': return `${a}结束推迟（${String(data.reason)}），共推迟 ${String(data.deferredMin)} 分钟`;
     case 'pre_refresh_failed': return `${a}preRefresh 脚本失败，照常刷新`;
     case 'heartbeat': return '凭证心跳';
+    case 'fleet_unreachable': return `机队缓存（Redis）不可达：${String(data.stage)}，跨机凭证同步暂停`;
+    case 'mirror_stale': return `${a}镜像凭证迟迟未更新（AT 剩 ${String(data.leftMin)} 分钟，来源 ${String(data.from)}）`;
+    case 'mirror_expiring': return `${a}镜像凭证即将过期且未更新（AT 剩 ${String(data.leftMin)} 分钟），使用它的 bot 将失效`;
+    case 'mirror_unreadable': return `${a}机队缓存里的凭证无法解密（密钥不一致或被篡改）`;
+    case 'fleet_config_error': return `fleet 配置无法启用（${String(data.error)}），只按单机模式运行`;
+    case 'mirror_write_failed': return `${a}镜像凭证写入失败`;
+    case 'mirror_hook_failed': return `${a}镜像脚本（${String(data.script)}）失败`;
     default: return `${a}${type}`;
   }
 }
@@ -53,6 +61,9 @@ export class Service {
   private cfgMtime = 0;
   private reloadPending = false;
   private lastUsagePoll = new Map<string, number>();
+  /** Fleet mode (cfg.fleet set); null in single-machine mode. Built lazily so the module only loads when configured. */
+  fleet: Fleet | null = null;
+  private fleetSig: string | null = null;
 
   readonly configPath: string;
   readonly now: () => number;
@@ -105,7 +116,44 @@ export class Service {
       }
     }
     this.accounts = next;
+    this.wireFleet();
   }
+
+  /** (Re)build the fleet when its config changed; attach it to the accounts it publishes. */
+  async ensureFleet(): Promise<void> {
+    const sig = this.cfg.fleet ? JSON.stringify(this.cfg.fleet) : null;
+    if (sig === this.fleetSig) return;
+    this.fleet?.stop();
+    this.fleet = null;
+    this.fleetSig = sig;
+    if (this.cfg.fleet) {
+      try {
+        const { Fleet } = await import('./fleet/fleet.ts');
+        this.fleet = new Fleet(this.cfg.fleet, {
+          emit: this.emit, now: this.now, logDir: paths(this.cfg).logDir,
+          sources: () => new Map([...this.accounts].map(([id, a]) => [id, {
+            credentialPath: a.cfg.credentialPath,
+            vaultText: () => readFileNoFollow(paths(this.cfg).vault(id)),
+          }])),
+        });
+        if (this.started) this.fleet.start();
+      } catch (e) {
+        this.fleetSig = null; // retried next tick
+        this.emit(null, 'fleet_config_error', 'error', { error: (e as Error).message }); // hourly at most (account null)
+      }
+    }
+    this.wireFleet();
+  }
+
+  private wireFleet(): void {
+    const f = this.fleet;
+    for (const [id, a] of this.accounts) {
+      const published = !!f && id in f.cfg.publish;
+      a.remoteBusy = published ? () => f!.remoteBusy(id) : undefined;
+      a.onApplied = published ? () => { void f!.publish(id); } : undefined;
+    }
+  }
+  private started = false;
 
   /** Hot reload; deferred while any account is mid-refresh. */
   reload(): void {
@@ -153,11 +201,17 @@ export class Service {
         this.emit(a.cfg.id, 'internal_error', 'error', { stage: 'startup', error: (e as Error).message });
       }
     }
+    this.started = true;
+    await this.ensureFleet();
+    this.fleet?.start();
     await this.tick();
     this.timer = setInterval(() => { void this.tick(); }, 60_000);
   }
 
-  stop(): void { if (this.timer) clearInterval(this.timer); }
+  stop(): void {
+    if (this.timer) clearInterval(this.timer);
+    this.fleet?.stop();
+  }
 
   private ticking = false;
 
@@ -178,7 +232,9 @@ export class Service {
     } catch (e) {
       this.store.addEvent(null, 'config_error', 'error', { error: (e as Error).message });
     }
+    await this.ensureFleet();
     await Promise.all([...this.accounts.values()].map((a) => this.tickAccount(a)));
+    if (this.fleet) await this.fleet.tick();
     this.heartbeatIfDue();
     this.auditIfDue();
   }

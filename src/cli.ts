@@ -16,7 +16,9 @@ const USAGE = `usage: cred-keeper <command> [--config <path>]
   doctor                             environment and configuration checks
   alert-test                         send a test event through the alert script
   keychain-sentinel                  create the keychain sentinel (run from a login session, macOS)
-  install-service [--load]           write (and optionally load) the service definition`;
+  install-service [--load]           write (and optionally load) the service definition
+  fleet-keygen <path>                create a fleet key file (copy the same file to every machine)
+  fleet-sync                         ask the running service to pull every mirror now`;
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(name);
@@ -108,6 +110,21 @@ async function main(): Promise<number> {
       const failed = svc.store.events({ type: 'alert_undelivered', limit: 1 }).some((e) => e.data.forEvent === id);
       console.log(failed ? 'alert script failed; see logs/scripts.log' : 'delivered');
       return failed ? 1 : 0;
+    }
+    case 'fleet-keygen': {
+      const out = process.argv[3];
+      if (!out || out.startsWith('--')) { console.error('usage: cred-keeper fleet-keygen <path>'); return 2; }
+      const { newFleetKey } = await import('./fleet/envelope.ts');
+      const { writeFileSync } = await import('node:fs');
+      writeFileSync(out, newFleetKey() + '\n', { mode: 0o600, flag: 'wx' }); // never overwrites an existing key
+      console.log(`wrote ${out} (0600). Copy this exact file to every fleet machine; point fleet.keyFile at it.`);
+      return 0;
+    }
+    case 'fleet-sync': {
+      const cfg = loadConfig(configPath);
+      const res = await fetch(`http://${cfg.listen.host}:${cfg.listen.port}/v1/fleet/sync`, { method: 'POST' });
+      console.log(JSON.stringify(await res.json(), null, 2));
+      return res.ok ? 0 : 1;
     }
     case 'install-service': {
       const cfg = loadConfig(configPath);
