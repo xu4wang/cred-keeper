@@ -117,6 +117,28 @@ test('a stale or replayed publication never replaces a newer copy', async () => 
   assert.equal(c.events('mirror_updated').length, 0);
 });
 
+test('RESP parser rejects malformed lengths and unterminated bulk strings', async () => {
+  const { parseReply } = await import('../src/fleet/resp.ts');
+  assert.throws(() => parseReply(Buffer.from('$abc\r\nxx\r\n')), /bad integer/);
+  assert.throws(() => parseReply(Buffer.from('*1.5\r\n')), /bad integer/);
+  assert.throws(() => parseReply(Buffer.from('$2\r\nabXY')), /not terminated/);
+  assert.equal(parseReply(Buffer.from('$5\r\nab')), null, 'incomplete → wait for more');
+  assert.deepEqual(parseReply(Buffer.from('*2\r\n$1\r\na\r\n:7\r\n'))!.value, ['a', 7]);
+});
+
+test('an equal-expiry publication of a different credential does not replace the copy', async () => {
+  const files = fleetFiles();
+  const c = consumer(files);
+  mkdirSync(join(c.d, 'accounts', 'acc', 'claude'), { recursive: true });
+  const exp = Date.now() + 300 * MIN;
+  const mine = credText('AT-MINE', 'RT-M', exp);
+  writeFileSync(c.mirrorPath, mine, { mode: 0o600 });
+  const key = Buffer.from(readFileSync(files.keyFile, 'utf-8').trim(), 'base64');
+  redis.kv.set('ck:cred:acc', { v: seal(key, 'ck:cred:acc', { name: 'acc', from: 'x', credentials: credText('AT-TIE', 'RT-T', exp), oauthAccount: null }), exp: null });
+  await c.svc.tick();
+  assert.equal(readFileSync(c.mirrorPath, 'utf-8'), mine);
+});
+
 test('a value sealed with another key, or moved to another key name, is rejected', async () => {
   const files = fleetFiles();
   const c = consumer(files);

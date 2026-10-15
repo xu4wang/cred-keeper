@@ -43,19 +43,24 @@ export function parseReply(buf: Buffer, pos = 0): { value: Reply | RedisError; n
   if (eol < 0) return null;
   const type = String.fromCharCode(buf[pos]);
   const line = buf.toString('utf-8', pos + 1, eol);
+  const int = (): number => {
+    if (!/^-?\d{1,15}$/.test(line)) throw new RedisError(`protocol error: bad integer ${JSON.stringify(line.slice(0, 20))}`);
+    return Number(line);
+  };
   switch (type) {
     case '+': return { value: line, next: eol + 2 };
     case '-': return { value: new RedisError(line), next: eol + 2 };
-    case ':': return { value: Number(line), next: eol + 2 };
+    case ':': return { value: int(), next: eol + 2 };
     case '$': {
-      const n = Number(line);
+      const n = int();
       if (n < 0) return { value: null, next: eol + 2 };
       const end = eol + 2 + n;
       if (buf.length < end + 2) return null;
+      if (buf[end] !== 0x0d || buf[end + 1] !== 0x0a) throw new RedisError('protocol error: bulk string not terminated');
       return { value: buf.toString('utf-8', eol + 2, end), next: end + 2 };
     }
     case '*': {
-      const n = Number(line);
+      const n = int();
       if (n < 0) return { value: null, next: eol + 2 };
       const out: Reply[] = [];
       let p = eol + 2;

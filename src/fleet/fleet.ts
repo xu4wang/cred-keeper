@@ -264,8 +264,9 @@ export class Fleet {
       this.ensureOauthAccount(m.cfg, p.oauthAccount); // e.g. the login file was deleted by hand
       return;
     }
-    // Never step back: a replayed or stale publication must not replace a newer copy.
-    if (local.ok && remote.cred.expiresAt < local.cred.expiresAt) return;
+    // Never step back: a replayed or stale publication must not replace the copy, so a different
+    // credential must expire strictly later (ties too: we cannot tell which one is newer).
+    if (local.ok && remote.cred.expiresAt <= local.cred.expiresAt) return;
     try {
       ensureDir0700(dirname(m.cfg.credentialPath));
       writeFileAtomic0600(m.cfg.credentialPath, p.credentials);
