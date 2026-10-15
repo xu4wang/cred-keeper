@@ -19,7 +19,8 @@
  */
 import { dirname } from 'node:path';
 import type { FleetConfig, Level, MirrorConfig } from '../config.ts';
-import { parseCred } from '../cred.ts';
+import { parseCred, type OauthCred } from '../cred.ts';
+import { release, tryAcquire } from '../lock.ts';
 import { claudeConfigFor } from '../label.ts';
 import { runScript, succeeded } from '../scripts.ts';
 import { ensureDir0700, nowIso, parseJsonObject, readFileNoFollow, writeFileAtomic0600 } from '../util.ts';
@@ -257,16 +258,36 @@ export class Fleet {
     if (!remote.ok) { m.lastError = `published credential: ${remote.reason}`; return; }
     m.from = p.from;
     m.lastError = null;
+    // Check-and-write under a lock on the copy, so no other writer (a second service
+    // instance) can slip a newer credential in between the comparison and the rename.
+    const lockPath = `${m.cfg.credentialPath}.ck-lock`;
+    try { ensureDir0700(dirname(m.cfg.credentialPath)); } catch (e) {
+      m.lastError = `write: ${(e as Error).message}`;
+      return;
+    }
+    if (!tryAcquire(lockPath)) { m.lastError = 'copy is locked by another writer'; return; }
+    let replaced: boolean;
+    try {
+      replaced = this.replaceIfNewer(m, p, remote.cred);
+    } finally {
+      release(lockPath);
+    }
+    if (replaced) await this.runMirrorScript(m.cfg, m.cfg.onUpdated, 'mirror_updated', remote.cred); // outside the lock
+  }
+
+  /** Under the copy's lock. True when the copy was replaced. */
+  private replaceIfNewer(m: MirrorState, p: Published, remoteCred: OauthCred): boolean {
+    const remote = { cred: remoteCred };
     let localText: string | null;
     try { localText = readFileNoFollow(m.cfg.credentialPath); } catch { localText = null; }
     const local = parseCred(localText);
     if (local.ok && local.cred.fingerprint === remote.cred.fingerprint) {
       this.ensureOauthAccount(m.cfg, p.oauthAccount); // e.g. the login file was deleted by hand
-      return;
+      return false;
     }
     // Never step back: a replayed or stale publication must not replace the copy, so a different
     // credential must expire strictly later (ties too: we cannot tell which one is newer).
-    if (local.ok && remote.cred.expiresAt <= local.cred.expiresAt) return;
+    if (local.ok && remote.cred.expiresAt <= local.cred.expiresAt) return false;
     try {
       ensureDir0700(dirname(m.cfg.credentialPath));
       writeFileAtomic0600(m.cfg.credentialPath, p.credentials);
@@ -274,7 +295,7 @@ export class Fleet {
     } catch (e) {
       m.lastError = `write: ${(e as Error).message}`;
       this.emit(m.cfg.name, 'mirror_write_failed', 'error', { error: (e as Error).message });
-      return;
+      return false;
     }
     m.lastUpdateAt = this.now();
     m.warned = null;
@@ -282,7 +303,7 @@ export class Fleet {
     this.emit(m.cfg.name, 'mirror_updated', 'info', {
       from: p.from, fingerprint: remote.cred.fingerprint, previous: local.ok ? local.cred.fingerprint : null,
     });
-    await this.runMirrorScript(m.cfg, m.cfg.onUpdated, 'mirror_updated', remote.cred);
+    return true;
   }
 
   /** Put the login's `oauthAccount` next to the copy; every other field of that file is kept. */
