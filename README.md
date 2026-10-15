@@ -55,6 +55,7 @@ See `examples/config.json`.
 | `accounts[].preRefresh` | Optional gate run before a due refresh, so it can wait until consumers are idle; see below. `preRefreshTimeoutSec` (default 20), `preRefreshMaxDeferMin` (default 60) |
 | `accounts[].legacyLockDir` | Also hold the legacy cron lock (mkdir + pid) while refreshing this account |
 | `accounts[].label` | Optional display name. Default: the local part (before `@`) of the e-mail the CLI is logged in with, read from the claude config next to the credential file (`~/.claude/…` → `~/.claude.json`, otherwise `<dir>/.claude.json`); the account id if none. Only the local part is ever returned |
+| `consumers.script` | Optional. Lists who uses which credential file (prints a JSON array of `{id, name, credentialPath}`); the API then shows `consumers` on each account and fleet mirror. Run every `consumers.refreshMin` (10) minutes; only `id` and `name` are kept. Example: `examples/consumers-botmux.sh` |
 | `alert.script` | Alert delivery script; if unset, no alerts are sent |
 | `alert.minLevel` | `info` / `warn` / `error` / `critical`; default `error` |
 | `alert.heartbeat` | `HH:MM` daily summary; if unset, no heartbeat |

@@ -36,18 +36,19 @@ export function handle(svc: Service, req: IncomingMessage, res: ServerResponse):
   try {
     if (url.pathname === '/healthz') {
       send(res, 200, { ok: true, version: VERSION, config: svc.configPath, accounts: [...svc.accounts.keys()], alerts: svc.alerter.enabled, keychainGate: svc.keychainGate,
-        fleet: svc.fleet ? { machine: svc.fleet.cfg.machine, publish: svc.fleet.cfg.publish, mirrors: svc.fleet.cfg.mirrors.map((m) => m.name) } : null });
+        fleet: svc.fleet ? { machine: svc.fleet.cfg.machine, publish: svc.fleet.cfg.publish, mirrors: svc.fleet.cfg.mirrors.map((m) => m.name) } : null,
+        consumers: svc.cfg.consumers ? svc.consumersStatus : null });
       return;
     }
     if (parts[0] === 'v1' && parts[1] === 'accounts') {
       if (parts.length === 2) {
-        send(res, 200, [...svc.accounts.values()].map((a) => ({ ...a.status(), usage: svc.usage.get(a.cfg.id) ?? null })));
+        send(res, 200, [...svc.accounts.values()].map((a) => ({ ...a.status(), usage: svc.usage.get(a.cfg.id) ?? null, consumers: svc.consumersOf(a.cfg.credentialPath) })));
         return;
       }
       const a = svc.accounts.get(parts[2]);
       if (!a) { send(res, 404, { error: 'unknown account' }); return; }
       if (parts.length === 3) {
-        send(res, 200, { ...a.status(), usage: svc.usage.get(a.cfg.id) ?? null, recentEvents: svc.store.events({ account: a.cfg.id, limit: 20 }) });
+        send(res, 200, { ...a.status(), usage: svc.usage.get(a.cfg.id) ?? null, consumers: svc.consumersOf(a.cfg.credentialPath), recentEvents: svc.store.events({ account: a.cfg.id, limit: 20 }) });
         return;
       }
       if (parts[3] === 'usage' && parts.length === 4) { send(res, 200, svc.usage.get(a.cfg.id) ?? null); return; }
@@ -57,7 +58,9 @@ export function handle(svc: Service, req: IncomingMessage, res: ServerResponse):
       }
     }
     if (url.pathname === '/v1/fleet') {
-      send(res, svc.fleet ? 200 : 404, svc.fleet ? svc.fleet.status() : { error: 'fleet mode is not configured' });
+      if (!svc.fleet) { send(res, 404, { error: 'fleet mode is not configured' }); return; }
+      const st = svc.fleet.status();
+      send(res, 200, { ...st, mirrors: st.mirrors.map((m) => ({ ...m, consumers: svc.consumersOf(m.credentialPath) })) });
       return;
     }
     if (url.pathname === '/v1/usage') {

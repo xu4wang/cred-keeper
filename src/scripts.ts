@@ -9,9 +9,12 @@ import { appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ensureDir0700, nowIso, redact } from './util.ts';
 
-export interface ScriptResult { code: number | null; signal: string | null; timedOut: boolean; ms: number; error?: string }
+export interface ScriptResult { code: number | null; signal: string | null; timedOut: boolean; ms: number; error?: string;
+  /** Only with `captureStdout`: the script's stdout (up to `CAPTURE_MAX` bytes; `stdoutTruncated` if more). Never logged. */
+  stdout?: string; stdoutTruncated?: boolean }
 
 const TAIL = 4096;
+export const CAPTURE_MAX = 1024 * 1024;
 
 export function runScript(opts: {
   script: string; env: Record<string, string>; stdin?: string; timeoutMs: number; logDir: string; label: string;
@@ -19,11 +22,21 @@ export function runScript(opts: {
   redactKnown?: readonly string[];
   /** How long to let stdio drain after exit (ms). */
   drainMs?: number;
+  /** Return stdout to the caller (it is then not written to the log). */
+  captureStdout?: boolean;
 }): Promise<ScriptResult> {
   const started = Date.now();
   return new Promise((resolve) => {
     let out = '';
     const keep = (b: Buffer) => { out = (out + b.toString('utf-8')).slice(-TAIL); };
+    const captured: Buffer[] = [];
+    let capturedBytes = 0;
+    let truncated = false;
+    const capture = (b: Buffer) => {
+      if (capturedBytes + b.length > CAPTURE_MAX) { truncated = true; b = b.subarray(0, Math.max(0, CAPTURE_MAX - capturedBytes)); }
+      captured.push(b);
+      capturedBytes += b.length;
+    };
     let child;
     try {
       child = spawn(opts.script, [], {
@@ -40,7 +53,7 @@ export function runScript(opts: {
       timedOut = true;
       try { process.kill(-child.pid!, 'SIGKILL'); } catch { /* gone */ }
     }, opts.timeoutMs);
-    child.stdout!.on('data', keep);
+    child.stdout!.on('data', opts.captureStdout ? capture : keep);
     child.stderr!.on('data', keep);
     child.stdin!.on('error', () => { /* script may not read stdin */ });
     child.stdin!.end(opts.stdin ?? '');
@@ -49,6 +62,7 @@ export function runScript(opts: {
       if (finished) return;
       finished = true;
       clearTimeout(timer);
+      if (opts.captureStdout) { r.stdout = Buffer.concat(captured).toString('utf-8'); r.stdoutTruncated = truncated; }
       try {
         ensureDir0700(opts.logDir);
         appendFileSync(join(opts.logDir, 'scripts.log'),

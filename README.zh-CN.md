@@ -61,6 +61,7 @@ npm ci --omit=dev
 | `accounts[].preRefresh` | 可选。到了该刷新的时候先执行它，让刷新等到使用方空闲再做，见下文。另有 `preRefreshTimeoutSec`（默认 20）、`preRefreshMaxDeferMin`（默认 60） |
 | `accounts[].legacyLockDir` | 刷新这个账号时，同时持有旧 cron 的锁（mkdir + pid） |
 | `accounts[].label` | 可选的显示名。不配置时，取 CLI 登录邮箱 @ 前面的部分，从凭证文件旁边的 claude 配置里读（`~/.claude/…` 对应 `~/.claude.json`，其他目录对应 `<目录>/.claude.json`）；都取不到就用账号 id。对外只返回 @ 前面的部分 |
+| `consumers.script` | 可选。列出谁在用哪个凭证文件（输出 `{id, name, credentialPath}` 的 JSON 数组），接口里每个账号和机队镜像就会带上 `consumers`。每 `consumers.refreshMin`（10）分钟运行一次，只保留 `id` 和 `name`。示例：`examples/consumers-botmux.sh` |
 | `alert.script` | 告警投递脚本；不配置就不发告警 |
 | `alert.minLevel` | `info` / `warn` / `error` / `critical`，默认 `error` |
 | `alert.heartbeat` | 每日汇总的时间，格式 `HH:MM`；不配置就不发心跳 |

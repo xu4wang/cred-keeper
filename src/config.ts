@@ -49,6 +49,8 @@ export interface Config {
   usageThresholds: { fiveHourPct: number; projectedPct: number };
   /** Optional: share credentials across machines through a central Redis. Absent = single-machine mode. */
   fleet?: FleetConfig;
+  /** Optional: a script that lists who uses which credential file (shown in the API). */
+  consumers?: { script: string; refreshMin: number; timeoutSec: number };
 }
 
 export interface MirrorConfig {
@@ -154,6 +156,11 @@ export function loadConfig(path: string): Config {
   }
   const dataDir = absPath(String(raw.dataDir ?? '~/.cred-keeper'), 'dataDir');
   const fleet = raw.fleet === undefined || raw.fleet === null ? undefined : parseFleet(raw.fleet, accounts);
+  const consumers = raw.consumers?.script ? {
+    script: absPath(String(raw.consumers.script), 'consumers.script'),
+    refreshMin: num(raw.consumers.refreshMin, 10, 'consumers.refreshMin', 1),
+    timeoutSec: num(raw.consumers.timeoutSec, 30, 'consumers.timeoutSec', 1),
+  } : undefined;
   const t = (raw.usageThresholds ?? {}) as Record<string, unknown>;
   return {
     path,
@@ -173,6 +180,7 @@ export function loadConfig(path: string): Config {
       projectedPct: num(t.projectedPct, 100, 'usageThresholds.projectedPct'),
     },
     fleet,
+    consumers,
   };
 }
 
