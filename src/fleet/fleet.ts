@@ -17,7 +17,7 @@
  * (see envelope.ts), producers rewrite them periodically, and every failure
  * here is reported but never stops the local refresh path.
  */
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { FleetConfig, Level, MirrorConfig } from '../config.ts';
 import { parseCred, type OauthCred } from '../cred.ts';
 import { release, tryAcquire } from '../lock.ts';
@@ -57,6 +57,8 @@ export interface MirrorStatus {
   lastUpdateAt: string | null;
   lastError: string | null;
   freshness: 'ok' | 'warn' | 'error' | 'missing';
+  /** A local copy of one of this machine's own accounts (not pulled from the fleet). */
+  local: boolean;
 }
 
 interface MirrorState {
@@ -80,6 +82,8 @@ export class Fleet {
   private readonly logDir: string;
   private readonly sources: () => Map<string, LocalSource>;
   private mirrors = new Map<string, MirrorState>();
+  /** Local copies of this machine's own published accounts, keyed by local account id. */
+  private locals = new Map<string, MirrorState>();
   private lastPublished = new Map<string, { fp: string; at: number }>();
   private stopped = false;
   private listener: RedisConn | null = null;
@@ -99,6 +103,15 @@ export class Fleet {
     this.sources = deps.sources;
     for (const m of cfg.mirrors) {
       this.mirrors.set(m.name, { cfg: m, syncing: null, from: null, lastSyncAt: null, lastUpdateAt: null, lastError: null, warned: null, errored: null });
+    }
+    if (cfg.localCopy) {
+      for (const [id, name] of Object.entries(cfg.publish)) {
+        const lc: MirrorConfig = {
+          name, credentialPath: localCopyPath(cfg.localCopy.dir, name), onUpdated: cfg.localCopy.onUpdated, busyCheck: cfg.localCopy.busyCheck,
+          onStale: undefined, hookTimeoutSec: cfg.localCopy.hookTimeoutSec, warnMin: 45, errorMin: 20,
+        };
+        this.locals.set(id, { cfg: lc, syncing: null, from: cfg.machine, lastSyncAt: null, lastUpdateAt: null, lastError: null, warned: null, errored: null });
+      }
     }
   }
 
@@ -149,6 +162,7 @@ export class Fleet {
 
   /** Called every service tick: republish, sync and check mirrors, report busy. Never throws. */
   async tick(): Promise<void> {
+    await Promise.all([...this.locals.keys()].map((id) => this.syncLocal(id))); // independent of Redis
     try {
       await this.publishDue();
       await Promise.all([...this.mirrors.keys()].map((n) => this.syncMirror(n)));
@@ -258,6 +272,32 @@ export class Fleet {
     if (!remote.ok) { m.lastError = `published credential: ${remote.reason}`; return; }
     m.from = p.from;
     m.lastError = null;
+    await this.writeCopy(m, p, remote.cred);
+  }
+
+  /**
+   * Bring a local copy of one of this machine's own accounts up to date from the vault.
+   * Same rules as a mirror (verbatim file, never step back, file lock, onUpdated), no Redis.
+   */
+  syncLocal(id: string): Promise<void> {
+    const m = this.locals.get(id);
+    if (!m) return Promise.resolve();
+    if (m.syncing) return m.syncing.then(() => this.syncLocal(id)); // a follow-up sees the newest vault
+    m.syncing = (async () => {
+      const src = this.sources().get(id);
+      const text = src?.vaultText() ?? null;
+      const cred = parseCred(text);
+      m.lastSyncAt = this.now();
+      if (!cred.ok || text === null || !src) { m.lastError = 'no usable vault'; return; }
+      m.lastError = null;
+      await this.writeCopy(m, { name: m.cfg.name, from: this.cfg.machine, credentials: text, oauthAccount: readOauthAccount(src.credentialPath),
+        fingerprint: cred.cred.fingerprint, expiresAt: cred.cred.expiresAt, publishedAt: this.now() }, cred.cred);
+    })().catch((e) => { m.lastError = (e as Error).message; }).finally(() => { m.syncing = null; });
+    return m.syncing;
+  }
+
+  private async writeCopy(m: MirrorState, p: Published, cred: OauthCred): Promise<void> {
+    const remote = { cred };
     // Check-and-write under a lock on the copy, so no other writer (a second service
     // instance) can slip a newer credential in between the comparison and the rename.
     const lockPath = `${m.cfg.credentialPath}.ck-lock`;
@@ -397,6 +437,16 @@ export class Fleet {
   async remoteBusy(id: string): Promise<{ busy: boolean; machines: string[] } | null> {
     const name = this.cfg.publish[id];
     if (!name) return { busy: false, machines: [] };
+    // Consumers of this machine's own local copy are asked directly (no Redis round trip).
+    const lc = this.locals.get(id);
+    if (lc?.cfg.busyCheck) {
+      const r = await runScript({
+        script: lc.cfg.busyCheck,
+        env: { CK_ACCOUNT: name, CK_EVENT: 'busy_check', CK_CREDENTIAL_PATH: lc.cfg.credentialPath },
+        timeoutMs: 20_000, logDir: this.logDir, label: `busyCheck:local:${name}`,
+      });
+      if (r.code === 75 && !r.timedOut && !r.error) return { busy: true, machines: [this.cfg.machine] };
+    }
     try {
       return await withRedis(this.target, async (c) => {
         const keys = (await c.cmd(['KEYS', `ck:busy:${name}:*`])) as string[];
@@ -424,7 +474,7 @@ export class Fleet {
     return {
       machine: this.cfg.machine,
       publish: { ...this.cfg.publish },
-      mirrors: [...this.mirrors.values()].map((m) => {
+      mirrors: [...this.mirrors.values(), ...this.locals.values()].map((m) => {
         let text: string | null;
         try { text = readFileNoFollow(m.cfg.credentialPath); } catch { text = null; }
         const c = parseCred(text);
@@ -439,6 +489,7 @@ export class Fleet {
           lastUpdateAt: m.lastUpdateAt === null ? null : nowIso(m.lastUpdateAt),
           lastError: m.lastError,
           freshness: left === null ? 'missing' : left < m.cfg.errorMin ? 'error' : left < m.cfg.warnMin ? 'warn' : 'ok',
+          local: [...this.locals.values()].includes(m),
         };
       }),
     };
@@ -450,6 +501,11 @@ export class Fleet {
     this.unreachableHour = hour;
     this.emit(null, 'fleet_unreachable', 'warn', { stage, error: e.message });
   }
+}
+
+/** Where every machine keeps every fleet account: <dir (~/accounts)>/<name>/claude/.credentials.json. */
+export function localCopyPath(dir: string, name: string): string {
+  return join(dir, name, 'claude', '.credentials.json');
 }
 
 function fieldOf(fields: string[], name: string): string | null {

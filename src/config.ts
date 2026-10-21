@@ -79,6 +79,12 @@ export interface FleetConfig {
   keyFile: string;
   /** Local account id → fleet-wide name to publish it under. */
   publish: Record<string, string>;
+  /**
+   * Also keep a local copy of every published account at ~/accounts/<name>/claude/.credentials.json,
+   * written straight from the vault (no Redis), with the same hooks as a mirror. Every machine then has
+   * the same ~/accounts/<name> layout for all fleet accounts, local or not.
+   */
+  localCopy?: { dir: string; onUpdated?: string; busyCheck?: string; hookTimeoutSec: number };
   mirrors: MirrorConfig[];
   /** Republish unchanged credentials this often, so a restarted (empty) Redis refills itself. */
   republishMin: number;
@@ -227,9 +233,25 @@ function parseFleet(f: Record<string, any>, accounts: AccountConfig[]): FleetCon
       errorMin,
     });
   }
+  let localCopy: FleetConfig['localCopy'];
+  if (f.localCopy) {
+    const l = f.localCopy as Record<string, unknown>;
+    localCopy = {
+      dir: absPath(String(l.dir ?? '~/accounts'), 'fleet.localCopy.dir'),
+      onUpdated: l.onUpdated ? absPath(String(l.onUpdated), 'fleet.localCopy.onUpdated') : undefined,
+      busyCheck: l.busyCheck ? absPath(String(l.busyCheck), 'fleet.localCopy.busyCheck') : undefined,
+      hookTimeoutSec: num(l.hookTimeoutSec, 60, 'fleet.localCopy.hookTimeoutSec', 1),
+    };
+    for (const [id, name] of Object.entries(publish)) {
+      const path = join(localCopy.dir, name, 'claude', '.credentials.json');
+      if (localPaths.has(path)) throw new Error(`fleet.localCopy: ${path} is account ${id}'s own credentialPath`);
+      if (mirrors.some((m) => m.credentialPath === path)) throw new Error(`fleet.localCopy: ${path} is used by a mirror`);
+    }
+  }
   return {
     machine,
     redis,
+    localCopy,
     redisPasswordFile: f.redisPasswordFile ? absPath(String(f.redisPasswordFile), 'fleet.redisPasswordFile') : undefined,
     keyFile: absPath(String(f.keyFile ?? '~/.cred-keeper/fleet.key'), 'fleet.keyFile'),
     publish,

@@ -157,7 +157,7 @@ export class Service {
     for (const [id, a] of this.accounts) {
       const published = !!f && id in f.cfg.publish;
       a.remoteBusy = published ? () => f!.remoteBusy(id) : undefined;
-      a.onApplied = published ? () => { void f!.publish(id); } : undefined;
+      a.onApplied = published ? () => { void f!.syncLocal(id); void f!.publish(id); } : undefined;
     }
   }
   private started = false;

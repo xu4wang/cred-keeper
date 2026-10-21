@@ -291,3 +291,48 @@ test('config validation', () => {
   assert.equal(ok.fleet!.mirrors[0].credentialPath, join(homedir(), 'accounts', 'y', 'claude', '.credentials.json'));
   assert.equal(ok.fleet!.republishMin, 5);
 });
+
+test('localCopy: own published account is copied to <dir>/<name> from the vault, updated after a refresh, hook runs', async () => {
+  const files = fleetFiles();
+  const dir = tmp();
+  const hookLog = join(tmp(), 'lc.log');
+  const hook = script(join(tmp(), 'h'), 'lc.sh', `echo "$CK_EVENT $CK_ACCOUNT $CK_FINGERPRINT" >> ${hookLog}`);
+  const p = producer(files, 300, { fleet: { localCopy: { dir, onUpdated: hook } } });
+  await p.svc.tick();
+  const copy = join(dir, 'acc', 'claude', '.credentials.json');
+  const vault = () => readFileSync(join(p.d, 'data', 'vault', 'a1.json'), 'utf-8');
+  assert.equal(readFileSync(copy, 'utf-8'), vault(), 'verbatim copy of the vault');
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, 'acc', 'claude', '.claude.json'), 'utf-8')).oauthAccount, ACCOUNT);
+  assert.equal(readFileSync(hookLog, 'utf-8').trim().split('\n').length, 1);
+  const st = p.svc.fleet!.status().mirrors.find((m) => m.local);
+  assert.equal(st?.name, 'acc');
+
+  // a refresh rewrites the copy right away (onApplied), and the hook runs again
+  const a = p.a;
+  (a.cfg as { marginMin: number }).marginMin = 400; // due now
+  refreshReply('AT-LC', 'RT-LC');
+  await p.svc.tick();
+  for (let i = 0; i < 40 && !readFileSync(copy, 'utf-8').includes('AT-LC'); i++) await new Promise((r) => setTimeout(r, 25));
+  assert.match(readFileSync(copy, 'utf-8'), /AT-LC/);
+  assert.equal(readFileSync(copy, 'utf-8'), vault());
+  assert.equal(readFileSync(hookLog, 'utf-8').trim().split('\n').length, 2);
+});
+
+test('localCopy busyCheck defers the owner refresh even when Redis is down', async () => {
+  const files = fleetFiles();
+  const dir = tmp();
+  const busy = script(join(tmp(), 'h'), 'busy.sh', 'exit 75');
+  const p = producer(files, 100, { fleet: { redis: 'redis://127.0.0.1:1', localCopy: { dir, busyCheck: busy } } });
+  const n = fake.tokenRequests.length;
+  await p.svc.tick();
+  assert.equal(fake.tokenRequests.length, n, 'deferred by a local copy consumer');
+  assert.deepEqual(p.events('refresh_deferred')[0].data.machines, ['prod']);
+});
+
+test('localCopy config: may not land on the account\'s own credential file', () => {
+  const d = tmp();
+  const p = join(d, 'cfg.json');
+  writeFileSync(p, JSON.stringify({ accounts: [{ id: 'a1', credentialPath: join(d, 'acc', 'claude', '.credentials.json') }],
+    fleet: { machine: 'm', redis: 'redis://h:6379', publish: { a1: 'acc' }, localCopy: { dir: d } } }));
+  assert.throws(() => loadConfig(p), /own credentialPath/);
+});
