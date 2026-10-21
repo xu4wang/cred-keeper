@@ -9,6 +9,8 @@ import { Store } from './store.ts';
 import { nextProbeSeq, probeKeychainGate, type GateState } from './keychain.ts';
 import { ensureDir0700, nowIso, readFileNoFollow } from './util.ts';
 import type { Fleet } from './fleet/fleet.ts';
+import { parseConsumers, type Consumer } from './consumers.ts';
+import { runScript, succeeded } from './scripts.ts';
 
 const FIVE_H = 5 * 3600_000;
 const SEVEN_D = 7 * 86_400_000;
@@ -43,6 +45,7 @@ function title(type: string, account: string | null, data: Record<string, unknow
     case 'mirror_stale': return `${a}镜像凭证迟迟未更新（AT 剩 ${String(data.leftMin)} 分钟，来源 ${String(data.from)}）`;
     case 'mirror_expiring': return `${a}镜像凭证即将过期且未更新（AT 剩 ${String(data.leftMin)} 分钟），使用它的 bot 将失效`;
     case 'mirror_unreadable': return `${a}机队缓存里的凭证无法解密（密钥不一致或被篡改）`;
+    case 'consumers_failed': return `使用方脚本失败（${String(data.error)}），沿用上次的列表`;
     case 'fleet_config_error': return `fleet 配置无法启用（${String(data.error)}），只按单机模式运行`;
     case 'mirror_write_failed': return `${a}镜像凭证写入失败`;
     case 'mirror_hook_failed': return `${a}镜像脚本（${String(data.script)}）失败`;
@@ -64,6 +67,10 @@ export class Service {
   /** Fleet mode (cfg.fleet set); null in single-machine mode. Built lazily so the module only loads when configured. */
   fleet: Fleet | null = null;
   private fleetSig: string | null = null;
+  /** consumers.script result: credentialPath → consumers. Kept across a failed run. */
+  private consumerMap: Map<string, Consumer[]> | null = null;
+  consumersStatus: { at: string | null; error: string | null } = { at: null, error: null };
+  private consumersRunAt = 0;
 
   readonly configPath: string;
   readonly now: () => number;
@@ -150,7 +157,7 @@ export class Service {
     for (const [id, a] of this.accounts) {
       const published = !!f && id in f.cfg.publish;
       a.remoteBusy = published ? () => f!.remoteBusy(id) : undefined;
-      a.onApplied = published ? () => { void f!.publish(id); } : undefined;
+      a.onApplied = published ? () => { void f!.syncLocal(id); void f!.publish(id); } : undefined;
     }
   }
   private started = false;
@@ -235,6 +242,7 @@ export class Service {
     await this.ensureFleet();
     await Promise.all([...this.accounts.values()].map((a) => this.tickAccount(a)));
     if (this.fleet) await this.fleet.tick();
+    await this.refreshConsumersIfDue();
     this.heartbeatIfDue();
     this.auditIfDue();
   }
@@ -307,6 +315,35 @@ export class Service {
         }
       }
     }
+  }
+
+  /** Consumers of one credential file; undefined when no consumers script is configured. */
+  consumersOf(credentialPath: string): Consumer[] | undefined {
+    if (!this.cfg.consumers) return undefined;
+    return this.consumerMap?.get(credentialPath) ?? [];
+  }
+
+  async refreshConsumersIfDue(force = false): Promise<void> {
+    const c = this.cfg.consumers;
+    if (!c) { this.consumerMap = null; return; }
+    if (!force && this.now() - this.consumersRunAt < c.refreshMin * 60_000) return;
+    this.consumersRunAt = this.now();
+    const r = await runScript({
+      script: c.script, env: { CK_EVENT: 'consumers' }, timeoutMs: c.timeoutSec * 1000,
+      logDir: paths(this.cfg).logDir, label: 'consumers', captureStdout: true,
+    });
+    let error: string | null = null;
+    if (!succeeded(r)) error = `exit ${r.code ?? r.signal ?? r.error}${r.timedOut ? ' (timeout)' : ''}`;
+    else if (r.stdoutTruncated) error = 'output too large';
+    else {
+      try { this.consumerMap = parseConsumers(r.stdout ?? ''); } catch (e) { error = (e as Error).message; }
+    }
+    if (error) {
+      this.emit(null, 'consumers_failed', 'warn', { error }); // hourly at most (account null); the last good list is kept
+    } else {
+      this.consumersStatus.at = nowIso(this.now());
+    }
+    this.consumersStatus.error = error;
   }
 
   private heartbeatIfDue(): void {

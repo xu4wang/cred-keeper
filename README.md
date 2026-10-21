@@ -55,6 +55,7 @@ See `examples/config.json`.
 | `accounts[].preRefresh` | Optional gate run before a due refresh, so it can wait until consumers are idle; see below. `preRefreshTimeoutSec` (default 20), `preRefreshMaxDeferMin` (default 60) |
 | `accounts[].legacyLockDir` | Also hold the legacy cron lock (mkdir + pid) while refreshing this account |
 | `accounts[].label` | Optional display name. Default: the local part (before `@`) of the e-mail the CLI is logged in with, read from the claude config next to the credential file (`~/.claude/…` → `~/.claude.json`, otherwise `<dir>/.claude.json`); the account id if none. Only the local part is ever returned |
+| `consumers.script` | Optional. Lists who uses which credential file (prints a JSON array of `{id, name, credentialPath}`); the API then shows `consumers` on each account and fleet mirror. Run every `consumers.refreshMin` (10) minutes; only `id` and `name` are kept. Example: `examples/consumers-botmux.sh` |
 | `alert.script` | Alert delivery script; if unset, no alerts are sent |
 | `alert.minLevel` | `info` / `warn` / `error` / `critical`; default `error` |
 | `alert.heartbeat` | `HH:MM` daily summary; if unset, no heartbeat |
@@ -128,6 +129,7 @@ machine can use any account. Each machine still refreshes only its own accounts.
   byte** (no schema change), plus the login's `oauthAccount` in the `.claude.json` next to it. A copy is only ever
   replaced by a newer one; then `onUpdated` runs. Consumers point at the copy (botmux: `credentialsSourceDir`
   = the copy's grandparent, e.g. `~/accounts/young`).
+- **localCopy** — optional `"localCopy": {"dir": "~/accounts", "onUpdated": …, "busyCheck": …}` also writes each published account to `<dir>/<name>/claude/.credentials.json` straight from the vault (no Redis), with mirror semantics. Every machine then has the same `~/accounts/<name>` layout for all fleet accounts, so a consumer switches accounts by changing one path. Local consumers' `busyCheck` is asked directly by the owner's refresh gate.
 - **busy** — `busyCheck` (exit 75 = a consumer is mid-turn) runs while the copy is in its owner's refresh window;
   the owner's refresh gate defers on it, exactly like a local `preRefresh`, within the same `preRefreshMaxDeferMin`/`redMin` limits.
 - **freshness** — a copy with fewer than `warnMin` (45) minutes left and no update → `mirror_stale` (warn);

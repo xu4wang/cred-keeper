@@ -49,6 +49,8 @@ export interface Config {
   usageThresholds: { fiveHourPct: number; projectedPct: number };
   /** Optional: share credentials across machines through a central Redis. Absent = single-machine mode. */
   fleet?: FleetConfig;
+  /** Optional: a script that lists who uses which credential file (shown in the API). */
+  consumers?: { script: string; refreshMin: number; timeoutSec: number };
 }
 
 export interface MirrorConfig {
@@ -77,6 +79,12 @@ export interface FleetConfig {
   keyFile: string;
   /** Local account id → fleet-wide name to publish it under. */
   publish: Record<string, string>;
+  /**
+   * Also keep a local copy of every published account at ~/accounts/<name>/claude/.credentials.json,
+   * written straight from the vault (no Redis), with the same hooks as a mirror. Every machine then has
+   * the same ~/accounts/<name> layout for all fleet accounts, local or not.
+   */
+  localCopy?: { dir: string; onUpdated?: string; busyCheck?: string; hookTimeoutSec: number };
   mirrors: MirrorConfig[];
   /** Republish unchanged credentials this often, so a restarted (empty) Redis refills itself. */
   republishMin: number;
@@ -154,6 +162,11 @@ export function loadConfig(path: string): Config {
   }
   const dataDir = absPath(String(raw.dataDir ?? '~/.cred-keeper'), 'dataDir');
   const fleet = raw.fleet === undefined || raw.fleet === null ? undefined : parseFleet(raw.fleet, accounts);
+  const consumers = raw.consumers?.script ? {
+    script: absPath(String(raw.consumers.script), 'consumers.script'),
+    refreshMin: num(raw.consumers.refreshMin, 10, 'consumers.refreshMin', 1),
+    timeoutSec: num(raw.consumers.timeoutSec, 30, 'consumers.timeoutSec', 1),
+  } : undefined;
   const t = (raw.usageThresholds ?? {}) as Record<string, unknown>;
   return {
     path,
@@ -173,6 +186,7 @@ export function loadConfig(path: string): Config {
       projectedPct: num(t.projectedPct, 100, 'usageThresholds.projectedPct'),
     },
     fleet,
+    consumers,
   };
 }
 
@@ -219,9 +233,25 @@ function parseFleet(f: Record<string, any>, accounts: AccountConfig[]): FleetCon
       errorMin,
     });
   }
+  let localCopy: FleetConfig['localCopy'];
+  if (f.localCopy) {
+    const l = f.localCopy as Record<string, unknown>;
+    localCopy = {
+      dir: absPath(String(l.dir ?? '~/accounts'), 'fleet.localCopy.dir'),
+      onUpdated: l.onUpdated ? absPath(String(l.onUpdated), 'fleet.localCopy.onUpdated') : undefined,
+      busyCheck: l.busyCheck ? absPath(String(l.busyCheck), 'fleet.localCopy.busyCheck') : undefined,
+      hookTimeoutSec: num(l.hookTimeoutSec, 60, 'fleet.localCopy.hookTimeoutSec', 1),
+    };
+    for (const [id, name] of Object.entries(publish)) {
+      const path = join(localCopy.dir, name, 'claude', '.credentials.json');
+      if (localPaths.has(path)) throw new Error(`fleet.localCopy: ${path} is account ${id}'s own credentialPath`);
+      if (mirrors.some((m) => m.credentialPath === path)) throw new Error(`fleet.localCopy: ${path} is used by a mirror`);
+    }
+  }
   return {
     machine,
     redis,
+    localCopy,
     redisPasswordFile: f.redisPasswordFile ? absPath(String(f.redisPasswordFile), 'fleet.redisPasswordFile') : undefined,
     keyFile: absPath(String(f.keyFile ?? '~/.cred-keeper/fleet.key'), 'fleet.keyFile'),
     publish,

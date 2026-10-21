@@ -61,6 +61,7 @@ npm ci --omit=dev
 | `accounts[].preRefresh` | 可选。到了该刷新的时候先执行它，让刷新等到使用方空闲再做，见下文。另有 `preRefreshTimeoutSec`（默认 20）、`preRefreshMaxDeferMin`（默认 60） |
 | `accounts[].legacyLockDir` | 刷新这个账号时，同时持有旧 cron 的锁（mkdir + pid） |
 | `accounts[].label` | 可选的显示名。不配置时，取 CLI 登录邮箱 @ 前面的部分，从凭证文件旁边的 claude 配置里读（`~/.claude/…` 对应 `~/.claude.json`，其他目录对应 `<目录>/.claude.json`）；都取不到就用账号 id。对外只返回 @ 前面的部分 |
+| `consumers.script` | 可选。列出谁在用哪个凭证文件（输出 `{id, name, credentialPath}` 的 JSON 数组），接口里每个账号和机队镜像就会带上 `consumers`。每 `consumers.refreshMin`（10）分钟运行一次，只保留 `id` 和 `name`。示例：`examples/consumers-botmux.sh` |
 | `alert.script` | 告警投递脚本；不配置就不发告警 |
 | `alert.minLevel` | `info` / `warn` / `error` / `critical`，默认 `error` |
 | `alert.heartbeat` | 每日汇总的时间，格式 `HH:MM`；不配置就不发心跳 |
@@ -132,6 +133,7 @@ npm ci --omit=dev
 - **mirrors**：别的机器负责刷新的账号。`credentialPath` 处的副本与凭证文件**逐字节一致**（不改 schema），旁边的
   `.claude.json` 写入登录的 `oauthAccount`。副本只会被更新的凭证替换，替换后运行 `onUpdated`。使用方指向副本
   （botmux：`credentialsSourceDir` = 副本的祖父目录，如 `~/accounts/young`）。
+- **localCopy**：可选 `"localCopy": {"dir": "~/accounts", "onUpdated": …, "busyCheck": …}`，把本机发布的每个号也直接从权威副本写一份到 `<dir>/<号名>/claude/.credentials.json`（不经 Redis），语义与镜像相同。这样每台机器上 7 个号都在同样的 `~/accounts/<号名>` 下，使用方换号只改一个路径。本机副本使用方的 `busyCheck` 由刷新闸门直接询问。
 - **查忙**：副本进入所属机器的刷新窗口后运行 `busyCheck`（exit 75 = 有使用方正在回复），所属机器的刷新闸门会据此推迟，
   规则与本机 `preRefresh` 相同（同样受 `preRefreshMaxDeferMin`/`redMin` 限制）。
 - **新鲜度**：副本 AT 剩余少于 `warnMin`（45）分钟仍未更新 → `mirror_stale`（warn）；少于 `errorMin`（20）→ `mirror_expiring`（error）并运行 `onStale`。
