@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmp } from './helpers.ts';
@@ -140,4 +140,83 @@ test('pre-refresh gate: botmux that cannot answer is a gate failure, never "idle
   const home = tmp();
   const missing = spawnSync('/bin/bash', [GATE], { encoding: 'utf-8', env: { HOME: home, PATH: `${NODE_DIR}:/usr/bin:/bin`, BOTMUX_CLI: join(home, 'nope.js') } });
   assert.equal(missing.status, 127);
+});
+
+const MIRROR = join(dirname(fileURLToPath(import.meta.url)), '..', 'examples', 'fleet-botmux-mirror.sh');
+const cred = (at: string, expiresAt: number) => JSON.stringify({ claudeAiOauth: { accessToken: at, refreshToken: `rt-${at}`, expiresAt } });
+const EMPTIED = JSON.stringify({ claudeAiOauth: { accessToken: '', refreshToken: '', expiresAt: 0 } });
+
+/** Bots: cli_a, cli_b, cli_c on ~/accounts/x (cli_c never started: no copy), cli_other on another account. */
+function mirrorHome(copies: Record<string, string>, fakeCliBody = `require('fs').appendFileSync(process.env.HOME + '/calls', process.argv.slice(2).join(' ') + '\\n');`) {
+  const home = tmp();
+  mkdirSync(join(home, 'accounts', 'x', 'claude'), { recursive: true });
+  writeFileSync(join(home, 'accounts', 'x', 'claude', '.credentials.json'), cred('NEW', 2000));
+  mkdirSync(join(home, '.botmux'), { recursive: true });
+  writeFileSync(join(home, '.botmux', 'bots.json'), JSON.stringify([
+    { larkAppId: 'cli_a', credentialsSourceDir: '~/accounts/x' },
+    { larkAppId: 'cli_b', credentialsSourceDir: '~/accounts/x' },
+    { larkAppId: 'cli_c', credentialsSourceDir: '~/accounts/x' },
+    { larkAppId: 'cli_other', credentialsSourceDir: '~/accounts/y' },
+  ]));
+  for (const [app, text] of Object.entries(copies)) {
+    mkdirSync(join(home, '.botmux', 'bots', app, 'claude'), { recursive: true });
+    writeFileSync(join(home, '.botmux', 'bots', app, 'claude', '.credentials.json'), text);
+  }
+  const cli = join(home, 'fake-botmux.js');
+  writeFileSync(cli, fakeCliBody);
+  const run = (event: string) => spawnSync('/bin/bash', [MIRROR], {
+    encoding: 'utf-8',
+    env: { HOME: home, PATH: `${NODE_DIR}:/usr/bin:/bin`, BOTMUX_CLI: cli, CK_EVENT: event,
+      CK_CREDENTIAL_PATH: join(home, 'accounts', 'x', 'claude', '.credentials.json') },
+  });
+  const copy = (app: string) => readFileSync(join(home, '.botmux', 'bots', app, 'claude', '.credentials.json'), 'utf-8');
+  const calls = () => { try { return readFileSync(join(home, 'calls'), 'utf-8').trim(); } catch { return ''; } };
+  return { home, run, copy, calls };
+}
+
+test('mirror hook: mirror_updated seeds emptied/older copies of this account\'s bots, then suspends them', () => {
+  const m = mirrorHome({ cli_a: EMPTIED, cli_b: cred('OLD', 1000), cli_other: cred('OTHER', 1) });
+  const r = m.run('mirror_updated');
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(m.copy('cli_a'), cred('NEW', 2000), 'an emptied copy (the Login expired case) is replaced');
+  assert.equal(m.copy('cli_b'), cred('NEW', 2000), 'an older copy is replaced');
+  assert.equal(m.copy('cli_other'), cred('OTHER', 1), 'a bot on another account is untouched');
+  assert.equal(statSync(join(m.home, '.botmux/bots/cli_a/claude/.credentials.json')).mode & 0o777, 0o600);
+  assert.ok(!existsSync(join(m.home, '.botmux/bots/cli_c')), 'a bot with no copy yet is left to botmux\'s cold-start copy');
+  assert.equal(m.calls(), 'suspend --bot cli_a\nsuspend --bot cli_b\nsuspend --bot cli_c', 'suspend still runs as the fallback');
+});
+
+test('mirror hook: never steps back — a copy expiring no earlier is kept', () => {
+  const m = mirrorHome({ cli_a: cred('NEWER', 3000), cli_b: cred('SAME-EXPIRY', 2000) });
+  const r = m.run('mirror_updated');
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(m.copy('cli_a'), cred('NEWER', 3000));
+  assert.equal(m.copy('cli_b'), cred('SAME-EXPIRY', 2000), 'a tie is ambiguous: keep it');
+});
+
+test('mirror hook: mirror_stale and busy_check never write copies', () => {
+  const m = mirrorHome({ cli_a: EMPTIED }, `console.log('· 将挂起: x');`);
+  assert.equal(m.run('mirror_stale').status, 0);
+  assert.equal(m.run('busy_check').status, 0);
+  assert.equal(m.copy('cli_a'), EMPTIED);
+});
+
+test('mirror hook: unusable source → no copy written, hook fails; a failed write fails the hook', () => {
+  const m = mirrorHome({ cli_a: cred('OLD', 1000), cli_b: EMPTIED });
+  writeFileSync(join(m.home, 'accounts', 'x', 'claude', '.credentials.json'), '{"claudeAiOauth":{"accessToken":"half-written"');
+  const r = m.run('mirror_updated');
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /refusing to seed/);
+  assert.equal(m.copy('cli_a'), cred('OLD', 1000));
+  assert.equal(m.copy('cli_b'), EMPTIED, 'even an emptied copy is not overwritten with junk');
+  assert.match(m.calls(), /suspend --bot cli_a/, 'suspend still attempted');
+
+  const w = mirrorHome({ cli_a: cred('OLD', 1000), cli_b: EMPTIED });
+  chmodSync(join(w.home, '.botmux/bots/cli_a/claude'), 0o500); // tmp file cannot be created
+  const r2 = w.run('mirror_updated');
+  chmodSync(join(w.home, '.botmux/bots/cli_a/claude'), 0o700);
+  assert.equal(r2.status, 1, r2.stdout);
+  assert.match(r2.stderr, /seed failed: cli_a/);
+  assert.equal(w.copy('cli_a'), cred('OLD', 1000));
+  assert.equal(w.copy('cli_b'), cred('NEW', 2000), 'one failure does not stop the others');
 });

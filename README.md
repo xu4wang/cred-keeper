@@ -140,7 +140,10 @@ machine can use any account. Each machine still refreshes only its own accounts.
 - **failure** — Redis is a cache: if it is down, local refreshes and hooks are unaffected (`fleet_unreachable`, hourly);
   copies stop updating until it is back; the owner's gate does not wait for busy reports it cannot read.
 - `examples/fleet-botmux-mirror.sh` is one script for all three mirror hooks on a botmux host: it finds the bots
-  whose `credentialsSourceDir` is the copy's account dir in `~/.botmux/bots.json`.
+  whose `credentialsSourceDir` is the copy's account dir in `~/.botmux/bots.json`. On `mirror_updated` it writes the
+  new credential into each such bot's copy (`~/.botmux/bots/<appId>/claude/.credentials.json`, never replacing a copy
+  that expires no earlier) and then suspends them — so a session stuck "replying", which never takes the suspend,
+  still gets the new token.
 - API: `GET /v1/fleet` (mirror status, no secrets), `POST /v1/fleet/sync` (pull every mirror now; also `cred-keeper fleet-sync`).
 
 ## API (GET only)

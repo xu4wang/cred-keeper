@@ -6,7 +6,9 @@
 # another account is only a bots.json change; nothing here needs editing.
 #
 #   CK_EVENT=busy_check     exit 75 if any of those bots is mid-turn (`suspend --dry-run` would queue), else 0
-#   CK_EVENT=mirror_updated suspend them: the next message cold-starts on the new credential
+#   CK_EVENT=mirror_updated write the new credential into each of their copies
+#                           (~/.botmux/bots/<appId>/claude/.credentials.json — what botmux copies on a
+#                           cold start; a running Claude Code re-reads it), then suspend them as a fallback
 #   CK_EVENT=mirror_stale   suspend them too (the copy is about to expire without an update; the alert says why)
 #
 # Absolute paths only: cred-keeper runs hooks with a minimal PATH.
@@ -42,6 +44,44 @@ case "${CK_EVENT:-}" in
     exit 0 ;;
   mirror_updated|mirror_stale)
     rc=0
+    # Seed first: a session stuck "replying" never takes the suspend, and its copy would keep the
+    # revoked token (Claude Code then empties it → "Login expired" on every turn).
+    # Never step back: a valid copy expiring no earlier than the new one is left alone.
+    # A copy that is not there yet (bot never started) is left to botmux's cold-start copy.
+    if [ "$CK_EVENT" = mirror_updated ]; then
+      "$NODE" -e '
+        const fs = require("fs"), path = require("path");
+        const [src, root, ...apps] = process.argv.slice(1);
+        const text = fs.readFileSync(src, "utf-8");
+        const parse = (t) => { try { const o = JSON.parse(t).claudeAiOauth;
+          return o && o.accessToken && o.refreshToken && Number.isFinite(o.expiresAt) ? o : null; } catch { return null; } };
+        const fresh = parse(text);
+        if (!fresh) { console.error("refusing to seed: " + src + " is not a usable credential"); process.exit(3); }
+        let rc = 0;
+        for (const app of apps) {
+          const dst = path.join(root, app, "claude", ".credentials.json");
+          let cur;
+          try { cur = fs.readFileSync(dst, "utf-8"); } catch (e) {
+            if (e.code === "ENOENT") { console.log("skip " + app + " (no copy yet)"); continue; }
+            console.error("seed failed: " + app + ": " + e.message); rc = 1; continue;
+          }
+          if (cur === text) { console.log("skip " + app + " (already current)"); continue; }
+          const c = parse(cur);
+          if (c && c.expiresAt >= fresh.expiresAt) { console.log("skip " + app + " (copy is not older)"); continue; }
+          const tmp = dst + ".tmp." + process.pid;
+          try {
+            fs.writeFileSync(tmp, text, { mode: 0o600 });
+            fs.renameSync(tmp, dst);
+            if (fs.readFileSync(dst, "utf-8") !== text) throw new Error("content differs after write");
+            console.log("seeded " + app + (c ? "" : " (copy was empty or unusable)"));
+          } catch (e) {
+            try { fs.unlinkSync(tmp); } catch {}
+            console.error("seed failed: " + app + ": " + e.message); rc = 1;
+          }
+        }
+        process.exit(rc);
+      ' "$CK_CREDENTIAL_PATH" "$HOME/.botmux/bots" "${BOTS[@]}" || rc=1
+    fi
     for app in "${BOTS[@]}"; do
       "$NODE" "$BOTMUX_CLI" suspend --bot "$app" || { echo "suspend failed: $app" >&2; rc=1; }
     done

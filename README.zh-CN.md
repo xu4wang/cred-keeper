@@ -142,7 +142,9 @@ npm ci --omit=dev
 - **故障**：Redis 只是缓存。它挂了不影响本机刷新和 hook（`fleet_unreachable`，每小时最多一次）；副本暂停更新，恢复后自动追平；
   所属机器读不到查忙结果时不会推迟刷新。
 - `examples/fleet-botmux-mirror.sh` 是 botmux 主机上三个镜像 hook 共用的脚本：它在 `~/.botmux/bots.json` 里找
-  `credentialsSourceDir` 指向这个副本账号目录的 bot。
+  `credentialsSourceDir` 指向这个副本账号目录的 bot。`mirror_updated` 时先把新凭证写进这些 bot 各自的副本
+  （`~/.botmux/bots/<appId>/claude/.credentials.json`；副本过期时间不早于新凭证的不覆盖），再 suspend 它们——
+  这样卡在「回复中」、suspend 永远执行不了的会话也能拿到新令牌。
 - 接口：`GET /v1/fleet`（镜像状态，无密钥）、`POST /v1/fleet/sync`（立即拉取所有镜像；命令行 `cred-keeper fleet-sync`）。
 
 ## 接口（只接受 GET）
